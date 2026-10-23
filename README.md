@@ -8,7 +8,7 @@ your own machine.
 
 ## Install
 
-1. Copy `addons/mixar_link` into your project's `addons/` folder.
+1. In the Mixar app, open the engine chip in the chat composer and press **Connect Godot**: it downloads the latest release and installs it into a project you pick. Or by hand: unzip [`mixar_link.zip`](https://github.com/satyam-fp/mixar-engine-godot/releases/latest/download/mixar_link.zip) into your project's `addons/` folder.
 2. Open **Project → Project Settings → Plugins** and enable **Mixar Link**.
 3. Keep the project open in the editor. The Mixar desktop app finds it on its own.
 
