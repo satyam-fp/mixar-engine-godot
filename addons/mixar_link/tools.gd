@@ -14,6 +14,17 @@ const IMPORT_TIMEOUT_MS := 120000
 const PLAY_TIMEOUT_MS := 20000
 const FRAME_TIMEOUT_MS := 8000
 const SKIP_EXTENSIONS := ["blend", "blend1"]
+const TEMPLATES := {"third_person": "res://addons/mixar_link/templates/third_person/"}
+const SCRIPT_DIR := "res://mixar/scripts"
+const BUILD_DIR := "res://mixar_build"
+const PLAYTEST_MAX_MS := 120000
+const BUILD_TIMEOUT_MS := 300000
+## The input map the templates' scripts read (physical keys).
+const INPUT_ACTIONS := {
+	"move_forward": [KEY_W, KEY_UP], "move_back": [KEY_S, KEY_DOWN],
+	"move_left": [KEY_A, KEY_LEFT], "move_right": [KEY_D, KEY_RIGHT],
+	"jump": [KEY_SPACE], "camera_left": [KEY_Q], "camera_right": [KEY_E],
+}
 
 var plugin: EditorPlugin
 var debugger: EditorDebuggerPlugin
@@ -36,9 +47,10 @@ func list_tools() -> Array:
 		_tool("status", "The engine, project, open scene, main scene and whether the game runs.", {}),
 		_tool("import_package", "Copy a Mixar export package folder into res://mixar/<folder>/ and import it.",
 			{"source_dir": {"type": "string"}, "folder": {"type": "string"}}, ["source_dir", "folder"]),
-		_tool("new_scene", "Create res://mixar/levels/<name>.tscn (Node3D root; with_defaults adds a sun, sky and camera), open it, optionally set it as the main scene.",
+		_tool("new_scene", "Create res://mixar/levels/<name>.tscn (Node3D root; with_defaults adds a sun, sky and camera; template third_person adds a player, game manager and HUD plus the input map; ground adds a 60 m floor), open it, optionally set it as the main scene.",
 			{"name": {"type": "string"}, "set_main": {"type": "boolean"}, "with_defaults": {"type": "boolean"},
-			 "overwrite": {"type": "boolean"}}, ["name"]),
+			 "overwrite": {"type": "boolean"}, "template": {"type": "string", "enum": ["", "third_person"]},
+			 "ground": {"type": "boolean"}, "player_position": vec3}, ["name"]),
 		_tool("open_scene", "Open an existing scene in the editor.", {"scene": {"type": "string"}}, ["scene"]),
 		_tool("place", "Instance a scene (an imported package's main file) into the open scene at a Blender-frame position and yaw, then save.",
 			{"scene": {"type": "string"}, "name": {"type": "string"}, "position": vec3,
@@ -53,6 +65,17 @@ func list_tools() -> Array:
 			{"source": {"type": "string", "enum": ["game", "editor"]}, "max_width": {"type": "integer"}}),
 		_tool("log", "Editor and game log lines after `since` (a sequence number from an earlier call).",
 			{"since": {"type": "integer"}, "max_lines": {"type": "integer"}, "errors_only": {"type": "boolean"}}),
+		_tool("playtest", "Run scripted steps in the running game: {hold: action, seconds}, {press: action}, {wait: s}, {walk_to: [x,y,z] Blender frame, timeout}, {state: true}; returns each step's result and the game state after it.",
+			{"steps": {"type": "array", "items": {"type": "object"}}}, ["steps"]),
+		_tool("write_script", "Write a GDScript under res://mixar/scripts/ after compiling it; a compile error is returned, not written.",
+			{"path": {"type": "string"}, "source": {"type": "string"}}, ["path", "source"]),
+		_tool("add_node", "Add a node of a built-in type (optionally with a script) to the open scene, with undo, then save.",
+			{"parent": {"type": "string"}, "type": {"type": "string"}, "name": {"type": "string"},
+			 "script": {"type": "string"}, "position": vec3}, ["type", "name"]),
+		_tool("set_property", "Set one property of a node in the open scene (Godot units and axes; arrays become vectors/colors), with undo, then save.",
+			{"node": {"type": "string"}, "property": {"type": "string"}, "value": {}}, ["node", "property", "value"]),
+		_tool("build_web", "Export the project for the web (HTML5) into res://mixar_build/web/; needs Godot's export templates installed.",
+			{}),
 	]
 
 
@@ -77,6 +100,11 @@ func call_tool(name: String, args: Dictionary) -> Dictionary:
 		"stop": result = await _stop()
 		"capture": result = await _capture(args)
 		"log": result = _log(args)
+		"playtest": result = await _playtest(args)
+		"write_script": result = _write_script(args)
+		"add_node": result = _add_node(args)
+		"set_property": result = _set_property(args)
+		"build_web": result = await _build_web()
 		_: return _err("Unknown tool: " + name)
 	if typeof(result) != TYPE_DICTIONARY:
 		return _err("%s failed inside Godot; see the Output panel." % name)
@@ -155,6 +183,9 @@ func _new_scene(args: Dictionary):
 	var path := MIXAR_DIR.path_join("levels").path_join(name + ".tscn")
 	if FileAccess.file_exists(path) and not bool(args.get("overwrite", false)):
 		return _err("%s exists; open_scene it, or pass overwrite=true." % path)
+	var template := String(args.get("template", ""))
+	if template != "" and not TEMPLATES.has(template):
+		return _err("Unknown template '%s' (templates: %s)." % [template, ", ".join(TEMPLATES.keys())])
 	var root := Node3D.new()
 	root.name = name
 	if bool(args.get("with_defaults", true)):
@@ -171,14 +202,52 @@ func _new_scene(args: Dictionary):
 		environment.sky = sky
 		environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 		env.environment = environment
-		var cam := Camera3D.new()
-		cam.name = "Camera"
-		cam.position = Vector3(0, 6, 12)
-		cam.rotation_degrees = Vector3(-26.57, 0, 0)  # looking at the origin
-		cam.current = true
-		for n in [sun, env, cam]:
+		var defaults: Array = [sun, env]
+		if template == "":  # a template's player brings its own camera
+			var cam := Camera3D.new()
+			cam.name = "Camera"
+			cam.position = Vector3(0, 6, 12)
+			cam.rotation_degrees = Vector3(-26.57, 0, 0)  # looking at the origin
+			cam.current = true
+			defaults.append(cam)
+		for n in defaults:
 			root.add_child(n)
 			n.owner = root
+	if bool(args.get("ground", false)):
+		var ground := StaticBody3D.new()
+		ground.name = "Ground"
+		var shape := CollisionShape3D.new()
+		shape.name = "Collision"
+		var box := BoxShape3D.new()
+		box.size = Vector3(60, 0.2, 60)
+		shape.shape = box
+		shape.position.y = -0.1
+		var mesh := MeshInstance3D.new()
+		mesh.name = "Mesh"
+		var plane := PlaneMesh.new()
+		plane.size = Vector2(60, 60)
+		mesh.mesh = plane
+		root.add_child(ground)
+		ground.owner = root
+		for n in [shape, mesh]:
+			ground.add_child(n)
+			n.owner = root
+	if template != "":
+		var dir: String = TEMPLATES[template]
+		var player := CharacterBody3D.new()
+		player.name = "Player"
+		player.set_script(load(dir + "player.gd"))
+		player.position = _to_godot(args.get("player_position", [0, 0, 1]) if typeof(args.get("player_position")) == TYPE_ARRAY else [0, 0, 1])
+		var game := Node.new()
+		game.name = "Game"
+		game.set_script(load(dir + "game.gd"))
+		var hud := CanvasLayer.new()
+		hud.name = "HUD"
+		hud.set_script(load(dir + "hud.gd"))
+		for n in [player, game, hud]:
+			root.add_child(n)
+			n.owner = root
+		_ensure_input_map()
 	var packed := PackedScene.new()
 	packed.pack(root)
 	root.free()
@@ -191,7 +260,8 @@ func _new_scene(args: Dictionary):
 	if set_main:
 		ProjectSettings.set_setting("application/run/main_scene", path)
 		ProjectSettings.save()
-	return _ok({"scene": path, "main_scene": set_main})
+	return _ok({"scene": path, "main_scene": set_main, "template": template,
+		"input_actions": INPUT_ACTIONS.keys() if template != "" else []})
 
 
 func _open_scene(args: Dictionary):
@@ -323,15 +393,10 @@ func _capture(args: Dictionary):
 				Image.INTERPOLATE_BILINEAR)
 		return _image({"source": "editor", "width": image.get_width(), "height": image.get_height()},
 			image.save_jpg_to_buffer(0.85))
-	var request: int = debugger.request_frame(max_width)
+	var request: int = debugger.request("capture", [max_width])
 	if request < 0:
 		return _err("The game is not running; call play first.")
-	var tree := plugin.get_tree()
-	var t0 := Time.get_ticks_msec()
-	var frame = debugger.take_frame(request)
-	while frame == null and Time.get_ticks_msec() - t0 < FRAME_TIMEOUT_MS:
-		await tree.process_frame
-		frame = debugger.take_frame(request)
+	var frame = await _reply(request, FRAME_TIMEOUT_MS)
 	if frame == null:
 		return _err("The game sent no frame within %d s." % (FRAME_TIMEOUT_MS / 1000))
 	var jpeg: PackedByteArray = frame[1]
@@ -344,6 +409,232 @@ func _log(args: Dictionary):
 	var batch: Dictionary = log_buffer.since(int(args.get("since", 0)),
 		clampi(int(args.get("max_lines", 200)), 1, 1000), bool(args.get("errors_only", false)))
 	return _ok(batch)
+
+
+func _playtest(args: Dictionary):
+	var steps = args.get("steps")
+	if typeof(steps) != TYPE_ARRAY or steps.is_empty() or steps.size() > 50:
+		return _err("steps must be a list of 1 to 50 steps.")
+	var budget := 5000.0
+	for step in steps:
+		if typeof(step) == TYPE_DICTIONARY:
+			budget += 500.0 + 1000.0 * (float(step.get("seconds", 0)) + float(step.get("wait", 0))
+				+ (float(step.get("timeout", 15)) if step.has("walk_to") else 0.0))
+	var request: int = debugger.request("playtest", [steps])
+	if request < 0:
+		return _err("The game is not running; call play first.")
+	var reply = await _reply(request, mini(int(budget), PLAYTEST_MAX_MS))
+	if reply == null:
+		return _err("The playtest sent no result in time; read log.")
+	return _ok({"steps": reply[1], "final_state": reply[2]})
+
+
+func _write_script(args: Dictionary):
+	var path := String(args.get("path", ""))
+	if not path.begins_with(SCRIPT_DIR + "/") or not path.ends_with(".gd") or path.contains(".."):
+		return _err("Scripts live under %s/ and end in .gd." % SCRIPT_DIR)
+	var source := String(args.get("source", ""))
+	var mark: int = log_buffer.latest()
+	var probe := GDScript.new()
+	probe.source_code = source
+	if probe.reload() != OK:
+		var errors: Array = []
+		for line in log_buffer.since(mark, 20, true).lines:
+			errors.append(line.text)
+		return _err("The script does not compile; nothing was written.", {"errors": errors})
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(path.get_base_dir()))
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return _err("Cannot write " + path)
+	file.store_string(source)
+	file.close()
+	if ResourceLoader.has_cached(path):
+		var cached: GDScript = load(path)
+		cached.source_code = source
+		cached.reload(true)
+	EditorInterface.get_resource_filesystem().update_file(path)
+	return _ok({"path": path, "lines": source.count("\n") + 1})
+
+
+func _add_node(args: Dictionary):
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return _err("No scene is open.")
+	var type := String(args.get("type", ""))
+	if not ClassDB.class_exists(type) or not ClassDB.is_parent_class(type, "Node") or not ClassDB.can_instantiate(type) \
+			or ClassDB.is_parent_class(type, "EditorPlugin"):
+		return _err("'%s' is not a node type that can be added." % type)
+	var name := String(args.get("name", ""))
+	if not _safe_name(name) or name.contains(" ") or name.contains("."):
+		return _err("name must be a plain node name.")
+	var parent := _scene_node(String(args.get("parent", ".")))
+	if parent == null:
+		return _err("No parent node at " + String(args.get("parent", ".")))
+	var node: Node = ClassDB.instantiate(type)
+	node.name = name
+	var script_path := String(args.get("script", ""))
+	if script_path != "":
+		if not script_path.begins_with("res://") or not ResourceLoader.exists(script_path):
+			node.free()
+			return _err("No such script: " + script_path)
+		var script: Script = load(script_path)
+		if not ClassDB.is_parent_class(type, script.get_instance_base_type()):
+			node.free()
+			return _err("%s extends %s, which a %s is not." % [script_path, script.get_instance_base_type(), type])
+		node.set_script(script)
+	if node is Node3D and typeof(args.get("position")) == TYPE_ARRAY:
+		node.position = _to_godot(args.position)
+	var undo := plugin.get_undo_redo()
+	undo.create_action("Mixar: add " + name)
+	undo.add_do_method(parent, "add_child", node, true)
+	undo.add_do_method(node, "set_owner", root)
+	undo.add_do_reference(node)
+	undo.add_undo_method(parent, "remove_child", node)
+	undo.commit_action()
+	EditorInterface.save_scene()
+	return _ok({"node": String(root.get_path_to(node)), "type": type})
+
+
+func _set_property(args: Dictionary):
+	var path := String(args.get("node", ""))
+	var node := _scene_node(path)
+	if node == null:
+		return _err("No node at " + path)
+	var prop := String(args.get("property", ""))
+	if prop == "" or not (prop in node):
+		return _err("%s (%s) has no property '%s'." % [path, node.get_class(), prop])
+	var current = node.get(prop)
+	var value = _coerce(args.get("value"), current)
+	if value is String and value.begins_with("res://") and (prop == "script" or current == null or current is Resource):
+		if not ResourceLoader.exists(value):
+			return _err("No such resource: " + value)
+		value = load(value)
+	var undo := plugin.get_undo_redo()
+	undo.create_action("Mixar: set %s.%s" % [node.name, prop])
+	undo.add_do_property(node, prop, value)
+	undo.add_undo_property(node, prop, current)
+	undo.commit_action()
+	EditorInterface.save_scene()
+	return _ok({"node": path, "property": prop, "value": var_to_str(node.get(prop)).left(200)})
+
+
+func _build_web():
+	var v := Engine.get_version_info()
+	var folder := "%d.%d.%s" % [v.major, v.minor, v.status] if v.patch == 0 else "%d.%d.%d.%s" % [v.major, v.minor, v.patch, v.status]
+	var templates := EditorInterface.get_editor_paths().get_data_dir().path_join("export_templates").path_join(folder)
+	if not (FileAccess.file_exists(templates.path_join("web_nothreads_release.zip"))
+			or FileAccess.file_exists(templates.path_join("web_release.zip"))):
+		return _err("Godot's web export templates (%s) are not installed: Editor > Manage Export Templates > Download and Install, then build_web again." % folder)
+	_ensure_web_preset()
+	var build := ProjectSettings.globalize_path(BUILD_DIR)
+	var out := build.path_join("web")
+	DirAccess.make_dir_recursive_absolute(out)
+	FileAccess.open(build.path_join(".gdignore"), FileAccess.WRITE).close()  # never imported
+	EditorInterface.save_all_scenes()
+	var started := Time.get_unix_time_from_system()
+	var t0 := Time.get_ticks_msec()
+	var pid := OS.create_process(OS.get_executable_path(), ["--headless", "--path",
+		ProjectSettings.globalize_path("res://"), "--export-release", "Web", out.path_join("index.html")])
+	if pid <= 0:
+		return _err("Could not start the export.")
+	var tree := plugin.get_tree()
+	while OS.is_process_running(pid) and Time.get_ticks_msec() - t0 < BUILD_TIMEOUT_MS:
+		await tree.process_frame
+	if OS.is_process_running(pid):
+		OS.kill(pid)
+		return _err("The web export did not finish within %d s." % (BUILD_TIMEOUT_MS / 1000))
+	var index := out.path_join("index.html")
+	if not FileAccess.file_exists(index) or FileAccess.get_modified_time(index) < int(started):
+		return _err("The web export wrote no index.html; read log for the exporter's errors.")
+	var files: Array = []
+	var total := 0
+	for f in DirAccess.get_files_at(out):
+		files.append(f)
+		total += FileAccess.get_file_as_bytes(out.path_join(f)).size()
+	return _ok({"folder": BUILD_DIR + "/web", "entry": "index.html", "files": files, "bytes": total,
+		"seconds": snappedf((Time.get_ticks_msec() - t0) / 1000.0, 0.1)})
+
+
+func _ensure_web_preset() -> void:
+	var cfg := ConfigFile.new()
+	cfg.load("res://export_presets.cfg")
+	var index := 0
+	while cfg.has_section("preset.%d" % index):
+		if cfg.get_value("preset.%d" % index, "name", "") == "Web":
+			return
+		index += 1
+	var section := "preset.%d" % index
+	cfg.set_value(section, "name", "Web")
+	cfg.set_value(section, "platform", "Web")
+	cfg.set_value(section, "runnable", true)
+	cfg.set_value(section, "export_filter", "all_resources")
+	cfg.set_value(section, "exclude_filter", "mixar_build/*")
+	cfg.set_value(section, "export_path", BUILD_DIR.trim_prefix("res://").path_join("web/index.html"))
+	# No threads: plays from any static host, without cross-origin isolation headers.
+	cfg.set_value(section + ".options", "variant/thread_support", false)
+	cfg.set_value(section + ".options", "vram_texture_compression/for_desktop", true)
+	cfg.set_value(section + ".options", "vram_texture_compression/for_mobile", false)
+	cfg.save("res://export_presets.cfg")
+
+
+func _ensure_input_map() -> void:
+	var changed := false
+	for action in INPUT_ACTIONS:
+		var key: String = "input/" + action
+		if ProjectSettings.has_setting(key):
+			continue
+		var events: Array = []
+		for code in INPUT_ACTIONS[action]:
+			var event := InputEventKey.new()
+			event.physical_keycode = code
+			events.append(event)
+		ProjectSettings.set_setting(key, {"deadzone": 0.2, "events": events})
+		changed = true
+	if changed:
+		ProjectSettings.save()
+
+
+func _reply(request: int, timeout_ms: int):
+	var tree := plugin.get_tree()
+	var t0 := Time.get_ticks_msec()
+	var reply = debugger.take(request)
+	while reply == null and Time.get_ticks_msec() - t0 < timeout_ms:
+		await tree.process_frame
+		reply = debugger.take(request)
+	return reply
+
+
+func _scene_node(path: String) -> Node:
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return null
+	return root if path in ["", "."] else root.get_node_or_null(NodePath(path))
+
+
+static func _coerce(value, current):
+	match typeof(current):
+		TYPE_VECTOR3:
+			if typeof(value) == TYPE_ARRAY and value.size() == 3:
+				return Vector3(float(value[0]), float(value[1]), float(value[2]))
+		TYPE_VECTOR2:
+			if typeof(value) == TYPE_ARRAY and value.size() == 2:
+				return Vector2(float(value[0]), float(value[1]))
+		TYPE_COLOR:
+			if typeof(value) == TYPE_ARRAY and value.size() >= 3:
+				return Color(float(value[0]), float(value[1]), float(value[2]), float(value[3]) if value.size() > 3 else 1.0)
+			if typeof(value) == TYPE_STRING:
+				return Color.from_string(value, current)
+		TYPE_INT:
+			return int(value)
+		TYPE_FLOAT:
+			return float(value)
+		TYPE_BOOL:
+			return bool(value)
+		TYPE_STRING_NAME:
+			return StringName(String(value))
+		TYPE_NODE_PATH:
+			return NodePath(String(value))
+	return value
 
 
 # ---------------------------------------------------------------------------

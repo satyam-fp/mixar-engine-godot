@@ -9,6 +9,7 @@ const Server := preload("res://addons/mixar_link/server.gd")
 const Tools := preload("res://addons/mixar_link/tools.gd")
 const Debugger := preload("res://addons/mixar_link/debugger.gd")
 const LogBuffer := preload("res://addons/mixar_link/log_buffer.gd")
+const ImportPlugin := preload("res://addons/mixar_link/import_plugin.gd")
 const AUTOLOAD := "MixarLink"
 const RUNTIME := "res://addons/mixar_link/runtime.gd"
 
@@ -16,6 +17,7 @@ var _server: Node
 var _tools: RefCounted
 var _debugger: EditorDebuggerPlugin
 var _log: Logger
+var _import: EditorScenePostImportPlugin
 var _discovery := ""
 
 
@@ -49,6 +51,8 @@ func _enter_tree() -> void:
 	_debugger = Debugger.new()
 	_debugger.log_buffer = _log
 	add_debugger_plugin(_debugger)
+	_import = ImportPlugin.new()
+	add_scene_post_import_plugin(_import)
 	_tools = Tools.new(self, _debugger, _log)
 	_server = Server.new()
 	_server.name = "MixarLinkServer"
@@ -72,6 +76,9 @@ func _exit_tree() -> void:
 	if _debugger != null:
 		remove_debugger_plugin(_debugger)
 		_debugger = null
+	if _import != null:
+		remove_scene_post_import_plugin(_import)
+		_import = null
 	if _log != null:
 		OS.remove_logger(_log)
 		_log = null

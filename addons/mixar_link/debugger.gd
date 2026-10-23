@@ -1,12 +1,20 @@
 @tool
 extends EditorDebuggerPlugin
-## The editor's end of the channel to the running game (runtime.gd): frame
-## requests go out as "mixar:capture"; frames ("mixar:frame") and log lines
-## ("mixar:log") come back.
+## The editor's end of the channel to the running game (runtime.gd). Requests
+## go out as "mixar:<kind>" with a request id first ("capture", "playtest");
+## the game answers with the same kind and id. Log lines ("mixar:log") stream
+## in unasked.
 
 var log_buffer: Logger
-var _frames := {}
+var _replies := {}
 var _next_request := 0
+var _runtime_ready := false
+
+
+func _setup_session(session_id: int) -> void:
+	var session := get_session(session_id)
+	session.started.connect(func(): _runtime_ready = false)
+	session.stopped.connect(func(): _runtime_ready = false)
 
 
 func _has_capture(capture: String) -> bool:
@@ -14,15 +22,18 @@ func _has_capture(capture: String) -> bool:
 
 
 func _capture(message: String, data: Array, _session_id: int) -> bool:
-	match message.trim_prefix("mixar:"):
-		"frame":
-			_frames[int(data[0])] = data
-			return true
-		"log":
-			for entry in data[0]:
-				log_buffer.add("game", String(entry.get("level", "info")), String(entry.get("text", "")),
-					String(entry.get("file", "")), int(entry.get("line", 0)))
-			return true
+	var kind := message.trim_prefix("mixar:")
+	if kind == "log":
+		for entry in data[0]:
+			log_buffer.add("game", String(entry.get("level", "info")), String(entry.get("text", "")),
+				String(entry.get("file", "")), int(entry.get("line", 0)))
+		return true
+	if kind == "ready":
+		_runtime_ready = true
+		return true
+	if kind in ["frame", "playtest"]:
+		_replies[int(data[0])] = data
+		return true
 	return false
 
 
@@ -33,24 +44,25 @@ func active_session() -> EditorDebuggerSession:
 	return null
 
 
+## A game is running AND its MixarLink runtime is listening.
 func connected() -> bool:
-	return active_session() != null
+	return _runtime_ready and active_session() != null
 
 
-## Ask the game for one frame; returns the request id, or -1 when no game runs.
-func request_frame(max_width: int) -> int:
+## Send a request to the game; returns its id, or -1 when no game runs.
+func request(kind: String, args: Array) -> int:
 	var session := active_session()
-	if session == null:
+	if session == null or not _runtime_ready:
 		return -1
 	_next_request += 1
-	session.send_message("mixar:capture", [_next_request, max_width])
+	session.send_message("mixar:" + kind, [_next_request] + args)
 	return _next_request
 
 
-## [request_id, jpeg bytes, width, height] once it has arrived, else null.
-func take_frame(request_id: int):
-	if not _frames.has(request_id):
+## The reply's data array once it has arrived, else null.
+func take(request_id: int):
+	if not _replies.has(request_id):
 		return null
-	var frame = _frames[request_id]
-	_frames.erase(request_id)
-	return frame
+	var reply = _replies[request_id]
+	_replies.erase(request_id)
+	return reply

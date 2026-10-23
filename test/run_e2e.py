@@ -86,6 +86,67 @@ def glb_cube(path: str, names: list[str]) -> None:
         fh.write(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
 
 
+def glb_level(path: str, nodes: list[dict]) -> None:
+    """A GLB of unit cubes: each node {name, t (glTF xyz), s (scale), extras?,
+    children?}; a child shares its parent's transform (a collision hint)."""
+    v = [(x, y, z) for x in (-.5, .5) for y in (-.5, .5) for z in (-.5, .5)]
+    faces = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1),
+             (2, 3, 7), (2, 7, 6), (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3)]
+    pos = struct.pack(f"<{len(v) * 3}f", *[c for p in v for c in p])
+    idx = struct.pack(f"<{len(faces) * 3}H", *[i for f in faces for i in f])
+    blob = pos + idx
+    flat, roots = [], []
+
+    def add(n):
+        i = len(flat)
+        flat.append(None)
+        node = {"name": n["name"], "mesh": 0}
+        if "t" in n:
+            node["translation"] = n["t"]
+        if "s" in n:
+            node["scale"] = n["s"]
+        if "extras" in n:
+            node["extras"] = n["extras"]
+        kids = [add({"name": c}) for c in n.get("children", [])]
+        if kids:
+            node["children"] = kids
+        flat[i] = node
+        return i
+
+    roots = [add(n) for n in nodes]
+    doc = {"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": roots}], "nodes": flat,
+           "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+           "accessors": [{"bufferView": 0, "componentType": 5126, "count": len(v), "type": "VEC3",
+                          "min": [-.5, -.5, -.5], "max": [.5, .5, .5]},
+                         {"bufferView": 1, "componentType": 5123, "count": len(faces) * 3, "type": "SCALAR"}],
+           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(pos)},
+                           {"buffer": 0, "byteOffset": len(pos), "byteLength": len(idx)}],
+           "buffers": [{"byteLength": len(blob)}]}
+    js = json.dumps(doc).encode()
+    js += b" " * (-len(js) % 4)
+    blob += b"\0" * (-len(blob) % 4)
+    body = struct.pack("<II", len(js), 0x4E4F534A) + js + struct.pack("<II", len(blob), 0x004E4942) + blob
+    with open(path, "wb") as fh:
+        fh.write(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
+
+
+# The Ruins test level, in glTF space (Y up; Blender (x, y, z) = glTF (x, z, -y)).
+# The door (6 m wide) blocks the straight path from the spawn to the goal until
+# both relics are collected; it then slides up out of the way.
+RUINS = [
+    {"name": "Ground", "t": [0, -0.5, -6], "s": [30, 1, 30],
+     "extras": {"mixar_body": "static", "mixar_nav": "walkable"}, "children": ["Ground_col-colonly"]},
+    {"name": "Spawn", "t": [0, 0.1, 2], "s": [0.3, 0.2, 0.3], "extras": {"mixar_role": "spawn"}},
+    {"name": "Relic1", "t": [-3, 0.6, -4], "s": [0.4, 0.4, 0.4], "extras": {"mixar_role": "pickup"},
+     "children": ["Relic1_col-convcolonly"]},
+    {"name": "Relic2", "t": [3, 0.6, -6], "s": [0.4, 0.4, 0.4], "extras": {"mixar_role": "pickup"}},
+    {"name": "TempleDoor", "t": [0, 1, -10], "s": [6, 2, 0.3],
+     "extras": {"mixar_role": "door", "mixar_body": "kinematic", "mixar_pivot": "slide_z"},
+     "children": ["TempleDoor_col-convcolonly"]},
+    {"name": "Goal", "t": [0, 1, -13], "s": [2, 2, 2], "extras": {"mixar_role": "goal"}},
+]
+
+
 class Client:
     def __init__(self, port: int, token: str):
         self.url = f"http://127.0.0.1:{port}/mcp"
@@ -282,6 +343,78 @@ def main() -> int:
         check(r["isError"] and "not running" in r["content"][0]["text"], "capture without a game is refused")
         r = client.call("nope")
         check(r["isError"], "unknown tool is an error result")
+
+        # --- P2: tags become behaviour; the template plays ---------------------
+        ruins_pkg = os.path.join(tmp, "Mixar Exports", "Ruins")
+        os.makedirs(ruins_pkg)
+        glb_level(os.path.join(ruins_pkg, "Ruins.glb"), RUINS)
+        with open(os.path.join(ruins_pkg, "manifest.json"), "w") as fh:
+            json.dump({"asset": "Ruins", "files": [{"file": "Ruins.glb"}],
+                       "engine": {"target": "godot", "version": 1, "objects": [], "collision_nodes": 3}}, fh)
+        r = client.call("new_scene", {"name": "RuinsLevel", "set_main": True, "template": "third_person"})
+        check(not r["isError"] and "jump" in r["structuredContent"]["input_actions"], "new_scene third_person", r)
+        r = client.call("new_scene", {"name": "Other", "template": "platformer"})
+        check(r["isError"] and "Unknown template" in r["content"][0]["text"], "unknown template refused")
+        godot_cfg = open(os.path.join(project, "project.godot")).read()
+        check("move_forward=" in godot_cfg and "camera_left=" in godot_cfg, "the input map is saved")
+        r = client.call("import_package", {"source_dir": ruins_pkg, "folder": "Ruins"})
+        check(not r["isError"] and r["structuredContent"]["imported"], "import the ruins", r)
+        r = client.call("place", {"scene": "res://mixar/Ruins/Ruins.glb", "name": "Ruins"})
+        check(not r["isError"], "place the ruins at the origin", r)
+        tree = {n["path"] for n in client.call("scene_tree")["structuredContent"]["nodes"]}
+        check({"Player", "Game", "HUD", "Ruins"} <= tree, "template nodes in the level", sorted(tree))
+
+        # Scripts, nodes, properties.
+        r = client.call("write_script", {"path": "res://mixar/scripts/spin.gd",
+                                         "source": "extends Node3D\nfunc _process(d):\n\trotate_y(d)\n"})
+        check(not r["isError"], "write_script", r)
+        r = client.call("write_script", {"path": "res://mixar/scripts/bad.gd", "source": "extends Node3D\nfunc (:\n"})
+        check(r["isError"] and not os.path.exists(os.path.join(project, "mixar", "scripts", "bad.gd")),
+              "a script that does not compile is not written", r)
+        check(r["isError"] and r["structuredContent"].get("errors"), "compile errors are returned", r)
+        r = client.call("write_script", {"path": "res://addons/evil.gd", "source": "extends Node"})
+        check(r["isError"], "scripts outside res://mixar/scripts are refused")
+        r = client.call("add_node", {"type": "Node3D", "name": "Marker", "script": "res://mixar/scripts/spin.gd",
+                                     "position": [5, 0, 1]})
+        check(not r["isError"] and r["structuredContent"]["node"] == "Marker", "add_node with a script", r)
+        r = client.call("add_node", {"type": "EditorPlugin", "name": "X"})
+        check(r["isError"], "editor-only types are refused")
+        r = client.call("set_property", {"node": "Marker", "property": "position", "value": [1, 2, 3]})
+        check(not r["isError"] and "Vector3(1, 2, 3)" in r["structuredContent"]["value"], "set_property", r)
+        r = client.call("set_property", {"node": "Marker", "property": "nope", "value": 1})
+        check(r["isError"], "unknown property refused")
+        r = client.call("build_web")
+        check(r["isError"] and "export templates" in r["content"][0]["text"] or not r["isError"],
+              "build_web without templates says how to install them", r)
+
+        r = client.call("play", {"scene": "main"}, timeout=60)
+        check(not r["isError"], "play the ruins", r)
+        steps = [
+            {"wait": 1.0}, {"state": True},
+            {"walk_to": [0, 13, 1], "timeout": 8},
+            {"walk_to": [-3, 4, 0.6], "timeout": 10},
+            {"walk_to": [3, 6, 0.6], "timeout": 10},
+            {"wait": 1.6},
+            {"walk_to": [0, 13, 1], "timeout": 10},
+            {"hold": "jump", "seconds": 0.1},
+            {"hold": "fly", "seconds": 0.1},
+        ]
+        r = client.call("playtest", {"steps": steps}, timeout=120)
+        check(not r["isError"], "playtest ran", r)
+        res = r["structuredContent"]["steps"] if not r["isError"] else []
+        def st(i):
+            return res[i]["state"] if i < len(res) else {}
+        check(st(1).get("total") == 2 and st(1).get("collected") == 0 and not st(1).get("doors_open"),
+              "two pickups counted, door shut", st(1))
+        check(len(res) > 2 and not res[2].get("reached") and not st(2).get("won"),
+              "the shut door blocks the goal", res[2] if len(res) > 2 else None)
+        check(st(3).get("collected") == 1, "first relic collected", res[3] if len(res) > 3 else None)
+        check(st(4).get("collected") == 2 and st(4).get("doors_open"), "second relic opens the door",
+              res[4] if len(res) > 4 else None)
+        check(st(6).get("won") is True, "the goal wins once the door is open", res[6] if len(res) > 6 else None)
+        check(len(res) == 9 and "no input action 'fly'" in res[8].get("error", ""),
+              "an unknown action stops the playtest", res[-1] if res else None)
+        client.call("stop")
     finally:
         proc.terminate()
         try:
