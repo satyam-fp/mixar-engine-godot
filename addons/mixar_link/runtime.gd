@@ -12,7 +12,14 @@ const LogBuffer := preload("res://addons/mixar_link/log_buffer.gd")
 const C := preload("res://addons/mixar_link/game/component.gd")
 const BATCH := 200
 const REACHED_M := 0.6
+const WAYPOINT_M := 0.5
 const STALL_S := 1.5
+## The player's capsule, for the navigation mesh playtests route by.
+const AGENT_RADIUS := 0.35
+const AGENT_HEIGHT := 1.8
+const AGENT_CLIMB := 0.35
+
+var _nav_region: NavigationRegion3D
 
 var _logger: Logger
 var _sent := 0
@@ -97,8 +104,10 @@ func _playtest(request_id: int, steps: Array) -> void:
 			await _wait(clampf(float(step.wait), 0.0, 30.0))
 		elif step.has("walk_to"):
 			result = await _walk_to(C.to_godot(step.walk_to), clampf(float(step.get("timeout", 15.0)), 1.0, 60.0))
+		elif step.has("prove_loop"):
+			result = await _prove_loop(clampf(float(step.get("timeout", 15.0)), 1.0, 60.0))
 		elif not step.has("state"):
-			result["error"] = "unknown step; use hold, press, wait, walk_to or state"
+			result["error"] = "unknown step; use hold, press, wait, walk_to, prove_loop or state"
 		result["step"] = step
 		result["state"] = _state()
 		results.append(result)
@@ -127,25 +136,37 @@ func _hold(action: String, seconds: float) -> Dictionary:
 func _walk_to(target: Vector3, timeout: float) -> Dictionary:
 	var player = get_tree().get_first_node_in_group("mixar_player")
 	if player == null or not ("autopilot" in player):
-		return {"error": "the level has no player with an autopilot (use the third_person template)"}
-	player.autopilot = target
+		return {"error": "the level has no player with an autopilot (use a template)"}
+	var route: Array = [target]
+	var routed := false
+	if player.has_method("uses_navigation") and player.uses_navigation():
+		var path := await _route(player.global_position, target)
+		if path.is_empty():
+			return {"reached": false, "no_path": true,
+				"distance_m": snappedf(_distance(player, target), 0.01), "seconds": 0.0}
+		route = path
+		routed = true
 	var t0 := Time.get_ticks_msec()
 	var best := INF
 	var best_at := t0
 	var jumped := false
 	var result := {}
+	var leg := 0
+	player.autopilot = route[0]
 	while true:
 		await get_tree().physics_frame
 		if not is_instance_valid(player):
 			return {"error": "the player was removed"}
-		var to: Vector3 = target - player.global_position
-		var flat := Vector2(to.x, to.z).length()
 		var now := Time.get_ticks_msec()
-		if flat < REACHED_M:
+		var left := _distance(player, target)
+		if left < REACHED_M:
 			result = {"reached": true}
 			break
-		if flat < best - 0.05:
-			best = flat
+		if leg < route.size() - 1 and _distance(player, route[leg]) < WAYPOINT_M:
+			leg += 1
+			player.autopilot = route[leg]
+		if left < best - 0.05:
+			best = left
 			best_at = now
 		elif now - best_at > STALL_S * 1000.0:
 			if not jumped and player.has_method("jump"):
@@ -159,10 +180,108 @@ func _walk_to(target: Vector3, timeout: float) -> Dictionary:
 			result = {"reached": false, "timed_out": true}
 			break
 	player.autopilot = null
-	var left: Vector3 = target - player.global_position
-	result["distance_m"] = snappedf(Vector2(left.x, left.z).length(), 0.01)
+	result["distance_m"] = snappedf(_distance(player, target), 0.01)
 	result["seconds"] = snappedf((Time.get_ticks_msec() - t0) / 1000.0, 0.1)
+	result["routed"] = routed
 	return result
+
+
+func _distance(player, target: Vector3) -> float:
+	if player.has_method("distance_to_target"):
+		return player.distance_to_target(target)
+	var to: Vector3 = target - player.global_position
+	return Vector2(to.x, to.z).length()
+
+
+## A path over a navigation mesh baked NOW from the level's static colliders
+## (so a door that opened since the last bake is open in it); empty when the
+## target is not connected to the player.
+func _route(from: Vector3, to: Vector3) -> Array:
+	var level := get_tree().current_scene
+	if level == null:
+		return [to]
+	if _nav_region == null or not is_instance_valid(_nav_region):
+		_nav_region = NavigationRegion3D.new()
+		_nav_region.name = "MixarPlaytestNavigation"
+		var mesh := NavigationMesh.new()
+		mesh.agent_radius = AGENT_RADIUS
+		mesh.agent_height = AGENT_HEIGHT
+		mesh.agent_max_climb = AGENT_CLIMB
+		mesh.geometry_parsed_geometry_type = NavigationMesh.PARSED_GEOMETRY_STATIC_COLLIDERS
+		mesh.geometry_source_geometry_mode = NavigationMesh.SOURCE_GEOMETRY_ROOT_NODE_CHILDREN
+		mesh.cell_size = 0.25
+		mesh.cell_height = 0.25
+		_nav_region.navigation_mesh = mesh
+		level.add_child(_nav_region)
+		await get_tree().physics_frame
+	var source := NavigationMeshSourceGeometryData3D.new()
+	NavigationServer3D.parse_source_geometry_data(_nav_region.navigation_mesh, source, level)
+	NavigationServer3D.bake_from_source_geometry_data(_nav_region.navigation_mesh, source)
+	var map := _nav_region.get_navigation_map()
+	# The map takes new polygons a sync or two later. A region's very first
+	# set does not always take (Godot 4.7), so set again when it has not.
+	for attempt in 2:
+		var iteration := NavigationServer3D.map_get_iteration_id(map)
+		NavigationServer3D.region_set_navigation_mesh(_nav_region.get_rid(), _nav_region.navigation_mesh)
+		var synced := false
+		for i in 60:
+			await get_tree().physics_frame
+			if NavigationServer3D.map_get_iteration_id(map) > iteration \
+					and NavigationServer3D.map_get_closest_point_owner(map, from).is_valid():
+				synced = true
+				break
+		if synced:
+			break
+	var start := NavigationServer3D.map_get_closest_point(map, from)
+	var end := NavigationServer3D.map_get_closest_point(map, to)
+	if Vector2(end.x - to.x, end.z - to.z).length() > 1.0:
+		return []  # the target is off the walkable area
+	var path := NavigationServer3D.map_get_path(map, start, end, true)
+	if path.is_empty() or Vector2(path[-1].x - end.x, path[-1].z - end.z).length() > 0.5:
+		return []
+	var out: Array = []
+	for p in path:
+		out.append(p)
+	out[-1] = to
+	return out
+
+
+## Every pickup (nearest first), then the goal: what a player has to do to win.
+func _prove_loop(timeout_each: float) -> Dictionary:
+	var player = get_tree().get_first_node_in_group("mixar_player")
+	if player == null:
+		return {"error": "the level has no player (use a template)"}
+	var visits: Array = []
+	var unreached: Array = []
+	var remaining: Array = get_tree().get_nodes_in_group("mixar_pickup")
+	while true:
+		var open_pickups: Array = []
+		for n in remaining:
+			if is_instance_valid(n) and not n.get("collected") and not unreached.has(String(n.name)):
+				open_pickups.append(n)
+		remaining = open_pickups
+		if remaining.is_empty():
+			break
+		remaining.sort_custom(func(a, b): return _distance(player, a.global_position) < _distance(player, b.global_position))
+		var target: Node3D = remaining[0]
+		var name := String(target.name)
+		var r := await _walk_to(target.global_position, timeout_each)
+		r["target"] = name
+		r["collected"] = not is_instance_valid(target) or bool(target.get("collected"))
+		visits.append(r)
+		if not r.collected:
+			unreached.append(name)
+	var goal = get_tree().get_first_node_in_group("mixar_goal")
+	if goal == null:
+		return {"visits": visits, "unreached": unreached, "error": "the level has no goal (mixar_role goal)"}
+	await _wait(1.5)  # doors finish opening
+	var r := await _walk_to(goal.global_position, timeout_each)
+	r["target"] = String(goal.name)
+	visits.append(r)
+	if not r.get("reached", false):
+		unreached.append(String(goal.name))
+	var won: bool = bool(_state().get("won", false))
+	return {"visits": visits, "unreached": unreached, "won": won}
 
 
 func _state() -> Dictionary:

@@ -14,10 +14,13 @@ const IMPORT_TIMEOUT_MS := 120000
 const PLAY_TIMEOUT_MS := 20000
 const FRAME_TIMEOUT_MS := 8000
 const SKIP_EXTENSIONS := ["blend", "blend1"]
-const TEMPLATES := {"third_person": "res://addons/mixar_link/templates/third_person/"}
+## Template name → the player's mode; every template shares the player, game
+## manager and HUD scripts in TEMPLATE_DIR.
+const TEMPLATES := {"third_person": "third_person", "top_down": "top_down", "platformer": "platformer"}
+const TEMPLATE_DIR := "res://addons/mixar_link/templates/"
 const SCRIPT_DIR := "res://mixar/scripts"
 const BUILD_DIR := "res://mixar_build"
-const PLAYTEST_MAX_MS := 120000
+const PLAYTEST_MAX_MS := 300000
 const BUILD_TIMEOUT_MS := 300000
 ## The input map the templates' scripts read (physical keys).
 const INPUT_ACTIONS := {
@@ -47,9 +50,9 @@ func list_tools() -> Array:
 		_tool("status", "The engine, project, open scene, main scene and whether the game runs.", {}),
 		_tool("import_package", "Copy a Mixar export package folder into res://mixar/<folder>/ and import it.",
 			{"source_dir": {"type": "string"}, "folder": {"type": "string"}}, ["source_dir", "folder"]),
-		_tool("new_scene", "Create res://mixar/levels/<name>.tscn (Node3D root; with_defaults adds a sun, sky and camera; template third_person adds a player, game manager and HUD plus the input map; ground adds a 60 m floor), open it, optionally set it as the main scene.",
+		_tool("new_scene", "Create res://mixar/levels/<name>.tscn (Node3D root; with_defaults adds a sun, sky and camera; template third_person | top_down | platformer adds a player, game manager and HUD plus the input map; ground adds a 60 m floor), open it, optionally set it as the main scene.",
 			{"name": {"type": "string"}, "set_main": {"type": "boolean"}, "with_defaults": {"type": "boolean"},
-			 "overwrite": {"type": "boolean"}, "template": {"type": "string", "enum": ["", "third_person"]},
+			 "overwrite": {"type": "boolean"}, "template": {"type": "string", "enum": ["", "third_person", "top_down", "platformer"]},
 			 "ground": {"type": "boolean"}, "player_position": vec3}, ["name"]),
 		_tool("open_scene", "Open an existing scene in the editor.", {"scene": {"type": "string"}}, ["scene"]),
 		_tool("place", "Instance a scene (an imported package's main file) into the open scene at a Blender-frame position and yaw, then save.",
@@ -65,7 +68,7 @@ func list_tools() -> Array:
 			{"source": {"type": "string", "enum": ["game", "editor"]}, "max_width": {"type": "integer"}}),
 		_tool("log", "Editor and game log lines after `since` (a sequence number from an earlier call).",
 			{"since": {"type": "integer"}, "max_lines": {"type": "integer"}, "errors_only": {"type": "boolean"}}),
-		_tool("playtest", "Run scripted steps in the running game: {hold: action, seconds}, {press: action}, {wait: s}, {walk_to: [x,y,z] Blender frame, timeout}, {state: true}; returns each step's result and the game state after it.",
+		_tool("playtest", "Run scripted steps in the running game: {hold: action, seconds}, {press: action}, {wait: s}, {walk_to: [x,y,z] Blender frame, timeout} (routed by a navigation mesh baked from the level; no_path when nothing connects), {prove_loop: true, timeout} (every pickup nearest-first, then the goal), {state: true}; returns each step's result and the game state after it.",
 			{"steps": {"type": "array", "items": {"type": "object"}}}, ["steps"]),
 		_tool("write_script", "Write a GDScript under res://mixar/scripts/ after compiling it; a compile error is returned, not written.",
 			{"path": {"type": "string"}, "source": {"type": "string"}}, ["path", "source"]),
@@ -236,10 +239,11 @@ func _new_scene(args: Dictionary):
 			ground.add_child(n)
 			n.owner = root
 	if template != "":
-		var dir: String = TEMPLATES[template]
+		var dir := TEMPLATE_DIR
 		var player := CharacterBody3D.new()
 		player.name = "Player"
 		player.set_script(load(dir + "player.gd"))
+		player.set("mode", TEMPLATES[template])
 		player.position = _to_godot(args.get("player_position", [0, 0, 1]) if typeof(args.get("player_position")) == TYPE_ARRAY else [0, 0, 1])
 		var game := Node.new()
 		game.name = "Game"
@@ -421,8 +425,13 @@ func _playtest(args: Dictionary):
 	var budget := 5000.0
 	for step in steps:
 		if typeof(step) == TYPE_DICTIONARY:
+			var walks := 0.0
+			if step.has("walk_to"):
+				walks = 1.0
+			elif step.has("prove_loop"):  # every pickup and the goal
+				walks = 12.0
 			budget += 500.0 + 1000.0 * (float(step.get("seconds", 0)) + float(step.get("wait", 0))
-				+ (float(step.get("timeout", 15)) if step.has("walk_to") else 0.0))
+				+ walks * float(step.get("timeout", 15)))
 	var request: int = debugger.request("playtest", [steps])
 	if request < 0:
 		return _err("The game is not running; call play first.")

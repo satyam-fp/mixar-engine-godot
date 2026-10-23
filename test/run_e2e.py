@@ -144,6 +144,22 @@ RUINS = [
      "extras": {"mixar_role": "door", "mixar_body": "kinematic", "mixar_pivot": "slide_z"},
      "children": ["TempleDoor_col-convcolonly"]},
     {"name": "Goal", "t": [0, 1, -13], "s": [2, 2, 2], "extras": {"mixar_role": "goal"}},
+    # Walls either side of the door: the door is the only way to the goal.
+    {"name": "WallWest", "t": [-9, 1.5, -10], "s": [12, 3, 0.3], "extras": {"mixar_body": "static"},
+     "children": ["WallWest_col-convcolonly"]},
+    {"name": "WallEast", "t": [9, 1.5, -10], "s": [12, 3, 0.3], "extras": {"mixar_body": "static"},
+     "children": ["WallEast_col-convcolonly"]},
+]
+
+# A side-scroller strip along Blender X: a pickup, a low block to jump, the goal.
+STRIP = [
+    {"name": "Floor", "t": [10, -0.5, 0], "s": [30, 1, 4], "extras": {"mixar_body": "static"},
+     "children": ["Floor_col-colonly"]},
+    {"name": "Spawn", "t": [0, 0.1, 0], "s": [0.3, 0.2, 0.3], "extras": {"mixar_role": "spawn"}},
+    {"name": "Coin", "t": [6, 0.8, 0], "s": [0.4, 0.4, 0.4], "extras": {"mixar_role": "pickup"}},
+    {"name": "Block", "t": [10, 0.4, 0], "s": [1, 0.8, 4], "extras": {"mixar_body": "static"},
+     "children": ["Block_col-convcolonly"]},
+    {"name": "Flag", "t": [16, 1, 0], "s": [1, 2, 2], "extras": {"mixar_role": "goal"}},
 ]
 
 
@@ -353,7 +369,7 @@ def main() -> int:
                        "engine": {"target": "godot", "version": 1, "objects": [], "collision_nodes": 3}}, fh)
         r = client.call("new_scene", {"name": "RuinsLevel", "set_main": True, "template": "third_person"})
         check(not r["isError"] and "jump" in r["structuredContent"]["input_actions"], "new_scene third_person", r)
-        r = client.call("new_scene", {"name": "Other", "template": "platformer"})
+        r = client.call("new_scene", {"name": "Other", "template": "racing"})
         check(r["isError"] and "Unknown template" in r["content"][0]["text"], "unknown template refused")
         godot_cfg = open(os.path.join(project, "project.godot")).read()
         check("move_forward=" in godot_cfg and "camera_left=" in godot_cfg, "the input map is saved")
@@ -417,15 +433,52 @@ def main() -> int:
             return res[i]["state"] if i < len(res) else {}
         check(st(1).get("total") == 2 and st(1).get("collected") == 0 and not st(1).get("doors_open"),
               "two pickups counted, door shut", st(1))
-        check(len(res) > 2 and not res[2].get("reached") and not st(2).get("won"),
-              "the shut door blocks the goal", res[2] if len(res) > 2 else None)
+        check(len(res) > 2 and res[2].get("no_path") and not st(2).get("won"),
+              "the shut door leaves the goal with no path", res[2] if len(res) > 2 else None)
         check(st(3).get("collected") == 1, "first relic collected", res[3] if len(res) > 3 else None)
         check(st(4).get("collected") == 2 and st(4).get("doors_open"), "second relic opens the door",
               res[4] if len(res) > 4 else None)
-        check(st(6).get("won") is True, "the goal wins once the door is open", res[6] if len(res) > 6 else None)
+        check(st(6).get("won") is True and res[6].get("routed"), "the goal wins once the door is open",
+              res[6] if len(res) > 6 else None)
         check(len(res) == 9 and "no input action 'fly'" in res[8].get("error", ""),
               "an unknown action stops the playtest", res[-1] if res else None)
         client.call("stop")
+
+        # prove_loop on a fresh run: every pickup, then the goal, unaided.
+        r = client.call("play", {"scene": "main"}, timeout=60)
+        r = client.call("playtest", {"steps": [{"wait": 1.0}, {"prove_loop": True, "timeout": 12}]}, timeout=200)
+        proof = r["structuredContent"]["steps"][1] if not r["isError"] else {}
+        check(proof.get("won") is True and proof.get("unreached") == [], "prove_loop wins the ruins", proof)
+        check([v.get("target") for v in proof.get("visits", [])][-1:] == ["Goal"], "prove_loop ends at the goal")
+        client.call("stop")
+
+        # Templates: top_down and platformer.
+        strip_pkg = os.path.join(tmp, "Mixar Exports", "Strip")
+        os.makedirs(strip_pkg)
+        glb_level(os.path.join(strip_pkg, "Strip.glb"), STRIP)
+        with open(os.path.join(strip_pkg, "manifest.json"), "w") as fh:
+            json.dump({"asset": "Strip", "files": [{"file": "Strip.glb"}], "engine": {"target": "godot"}}, fh)
+        r = client.call("new_scene", {"name": "StripLevel", "set_main": True, "template": "platformer"})
+        check(not r["isError"], "new_scene platformer", r)
+        client.call("import_package", {"source_dir": strip_pkg, "folder": "Strip"})
+        client.call("place", {"scene": "res://mixar/Strip/Strip.glb", "name": "Strip"})
+        level = open(os.path.join(project, "mixar", "levels", "StripLevel.tscn")).read()
+        check('mode = "platformer"' in level, "the platformer player is saved in its mode")
+        client.call("play", {"scene": "main"}, timeout=60)
+        r = client.call("playtest", {"steps": [
+            {"wait": 1.0},
+            {"hold": "move_right", "seconds": 0.6}, {"state": True},
+            {"prove_loop": True, "timeout": 10}]}, timeout=200)
+        res = r["structuredContent"]["steps"] if not r["isError"] else []
+        moved = res[1]["state"]["player_position"] if len(res) > 1 else [0, 0, 0]
+        check(moved[0] > 1.0 and abs(moved[1]) < 0.05, "move_right runs along Blender X in the lane",
+              moved)
+        proof = res[3] if len(res) > 3 else {}
+        check(proof.get("won") is True, "the platformer is won over the block (a jump)", proof)
+        client.call("stop")
+        r = client.call("new_scene", {"name": "TopLevel", "template": "top_down", "ground": True})
+        check(not r["isError"] and 'mode = "top_down"' in open(os.path.join(
+            project, "mixar", "levels", "TopLevel.tscn")).read(), "new_scene top_down", r)
     finally:
         proc.terminate()
         try:

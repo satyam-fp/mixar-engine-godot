@@ -45,14 +45,20 @@ after `initialize`).
 | `play` / `stop` | Runs the game from the editor and waits for it to connect; stops it |
 | `capture` | A JPEG frame of the running game, or of the editor's 3D viewport |
 | `log` | Editor and game log lines after a sequence number; `errors_only` filters |
-| `playtest` | Scripted steps in the running game (`hold`/`press` an input action, `wait`, `walk_to` a point, `state`) with the game state after each |
+| `playtest` | Scripted steps in the running game (`hold`/`press` an input action, `wait`, `walk_to` a point, `prove_loop`, `state`) with the game state after each. `walk_to` follows a navigation mesh baked from the level's colliders at that moment (`no_path` when nothing connects); `prove_loop` visits every pickup nearest-first, then the goal, and reports `won` and what it could not reach |
 | `write_script` | Writes a GDScript under `res://mixar/scripts/`, compiled first (a script that fails is not written) |
 | `add_node` / `set_property` | Adds a built-in node (optionally scripted) / sets a property, with undo, then saves |
 | `build_web` | Exports a no-threads web build into `res://mixar_build/web/` (needs Godot's export templates) |
 | `build_info` | The last web build's files and folder, for the Mixar desktop to upload a share |
 
-`new_scene` takes `template: "third_person"`: a player (WASD/arrows, Space jumps,
-Q/E turn the camera), a game manager and a HUD around the level, plus the input map.
+`new_scene` takes a `template` that wraps the level in a game: a player, a game
+manager, a HUD and the input map. Space jumps in all three:
+
+| Template | Player |
+| --- | --- |
+| `third_person` | WASD / arrows relative to the camera; Q / E turn it |
+| `top_down` | A camera high above; WASD / arrows move north/south/west/east |
+| `platformer` | A side view (from Blender -Y): A / D run along Blender X, the player keeps its lane |
 
 ## Game tags
 
@@ -81,7 +87,7 @@ extras. Godot reads the extras as node metadata.
 ## Test
 
 ```sh
-python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (55 checks, plays a level to a win)
+python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (62 checks: plays levels to a win)
 python3 test/run_e2e.py --godot /path/to/Godot --windowed-game   # also checks a real frame
 ```
 
