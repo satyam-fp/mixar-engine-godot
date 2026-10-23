@@ -8,7 +8,7 @@ extends RefCounted
 ## Mixar works in: Blender (x, y, z) is Godot (x, z, -y), and a yaw about
 ## Blender's Z is the same angle about Godot's Y.
 
-const ADAPTER_VERSION := "0.2.1"
+const ADAPTER_VERSION := "0.3.0"
 ## Project settings the STUDIO sets (never the agent): "owned" (default, a
 ## Mixar-made game) or "plugin" (an existing project: Mixar keeps to
 ## res://mixar/, never edits project settings, and edits only levels under
@@ -74,10 +74,21 @@ func list_tools() -> Array:
 			{"source": {"type": "string", "enum": ["game", "editor"]}, "max_width": {"type": "integer"}}),
 		_tool("log", "Editor and game log lines after `since` (a sequence number from an earlier call).",
 			{"since": {"type": "integer"}, "max_lines": {"type": "integer"}, "errors_only": {"type": "boolean"}}),
-		_tool("playtest", "Run scripted steps in the running game: {hold: action, seconds}, {press: action}, {wait: s}, {walk_to: [x,y,z] Blender frame, timeout} (routed by a navigation mesh baked from the level; no_path when nothing connects), {prove_loop: true, timeout} (every pickup nearest-first, then the goal), {state: true}; returns each step's result and the game state after it.",
+		_tool("playtest", "Run scripted steps in the running game: {hold: action, seconds}, {press: action}, {wait: s}, {walk_to: [x,y,z] Blender frame, timeout} (routed by a navigation mesh baked from the level; no_path when nothing connects), {prove_loop: true, timeout} (every pickup nearest-first, then the goal), {inspect: {node, properties}} (live values from the running game), {state: true}; returns each step's result and the game state after it.",
 			{"steps": {"type": "array", "items": {"type": "object"}}}, ["steps"]),
 		_tool("write_script", "Write a GDScript under res://mixar/scripts/ after compiling it; a compile error is returned, not written.",
 			{"path": {"type": "string"}, "source": {"type": "string"}}, ["path", "source"]),
+		_tool("read_file", "A text file of the project (res://…): a script, scene, resource or setting file.",
+			{"path": {"type": "string"}}, ["path"]),
+		_tool("list_files", "Files under a res:// folder (recursive), with sizes; the .godot cache is skipped.",
+			{"dir": {"type": "string"}, "max_files": {"type": "integer"}}),
+		_tool("write_file", "Write a text file under res://mixar/ (.gd compiled, .tscn/.tres loaded, first; a file that fails is not written).",
+			{"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
+		_tool("delete_file", "Delete a file under res://mixar/.", {"path": {"type": "string"}}, ["path"]),
+		_tool("remove_node", "Remove a node (not the root) from the open scene, with undo, then save.",
+			{"node": {"type": "string"}}, ["node"]),
+		_tool("project_setting", "Read a project setting, or (owned projects) set one: input/<action> ({keys: [..], mouse: [..]}), autoload/<Name> (a res:// script or scene; null removes), application/run/main_scene, display/window/*, physics/*, rendering/environment/defaults/*, layer_names/*.",
+			{"name": {"type": "string"}, "value": {}}, ["name"]),
 		_tool("add_node", "Add a node of a built-in type (optionally with a script) to the open scene, with undo, then save.",
 			{"parent": {"type": "string"}, "type": {"type": "string"}, "name": {"type": "string"},
 			 "script": {"type": "string"}, "position": vec3}, ["type", "name"]),
@@ -112,7 +123,14 @@ func call_tool(name: String, args: Dictionary) -> Dictionary:
 		"capture": result = await _capture(args)
 		"log": result = _log(args)
 		"playtest": result = await _playtest(args)
-		"write_script": result = _write_script(args)
+		"write_script": result = _write_file({"path": args.get("path", ""), "content": args.get("source", "")},
+			SCRIPT_DIR)
+		"read_file": result = _read_file(args)
+		"list_files": result = _list_files(args)
+		"write_file": result = _write_file(args, MIXAR_DIR)
+		"delete_file": result = _delete_file(args)
+		"remove_node": result = _remove_node(args)
+		"project_setting": result = _project_setting(args)
 		"add_node": result = _add_node(args)
 		"set_property": result = _set_property(args)
 		"build_web": result = await _build_web()
@@ -456,31 +474,226 @@ func _playtest(args: Dictionary):
 	return _ok({"steps": reply[1], "final_state": reply[2]})
 
 
-func _write_script(args: Dictionary):
+const TEXT_EXTENSIONS := ["gd", "tscn", "tres", "gdshader", "json", "txt", "md", "cfg", "csv"]
+const SETTING_PREFIXES := ["input/", "autoload/", "application/run/main_scene", "application/config/name",
+	"display/window/", "physics/", "rendering/environment/defaults/", "layer_names/"]
+const MAX_READ_BYTES := 200000
+
+
+## A res:// path inside `root` (default res://mixar) that is safe to write.
+func _writable(path: String, root := MIXAR_DIR) -> String:
+	if not path.begins_with(root + "/") or path.contains("..") or path.substr(6).contains("//"):
+		return "Mixar writes only under %s/." % root
+	if path.get_extension().to_lower() not in TEXT_EXTENSIONS:
+		return "Write only text files (%s)." % ", ".join(TEXT_EXTENSIONS)
+	return ""
+
+
+func _write_file(args: Dictionary, root := MIXAR_DIR):
 	var path := String(args.get("path", ""))
-	if not path.begins_with(SCRIPT_DIR + "/") or not path.ends_with(".gd") or path.contains(".."):
-		return _err("Scripts live under %s/ and end in .gd." % SCRIPT_DIR)
-	var source := String(args.get("source", ""))
-	var mark: int = log_buffer.latest()
-	var probe := GDScript.new()
-	probe.source_code = source
-	if probe.reload() != OK:
-		var errors: Array = []
-		for line in log_buffer.since(mark, 20, true).lines:
-			errors.append(line.text)
-		return _err("The script does not compile; nothing was written.", {"errors": errors})
+	var refusal := _writable(path, root)
+	if refusal != "":
+		return _err(refusal)
+	var content := String(args.get("content", ""))
+	var problem := _validate(path, content)
+	if problem.has("error"):
+		return _err(problem.error, problem)
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(path.get_base_dir()))
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		return _err("Cannot write " + path)
-	file.store_string(source)
+	file.store_string(content)
 	file.close()
-	if ResourceLoader.has_cached(path):
+	if path.ends_with(".gd") and ResourceLoader.has_cached(path):
 		var cached: GDScript = load(path)
-		cached.source_code = source
+		cached.source_code = content
 		cached.reload(true)
 	EditorInterface.get_resource_filesystem().update_file(path)
-	return _ok({"path": path, "lines": source.count("\n") + 1})
+	var root_node := EditorInterface.get_edited_scene_root()
+	if path.ends_with(".tscn") and root_node and root_node.scene_file_path == path:
+		EditorInterface.reload_scene_from_path(path)
+	return _ok({"path": path, "lines": content.count("\n") + 1, "bytes": content.to_utf8_buffer().size()})
+
+
+## {} when `content` is fine for `path`, else {"error", "errors"?}.
+func _validate(path: String, content: String) -> Dictionary:
+	var mark: int = log_buffer.latest()
+	match path.get_extension().to_lower():
+		"gd":
+			var probe := GDScript.new()
+			# A class_name already registered for this very file would clash in
+			# the probe; the written file keeps it.
+			probe.source_code = RegEx.create_from_string("(?m)^class_name\\s+\\w+.*$").sub(content, "", true)
+			if probe.reload() != OK:
+				return {"error": "The script does not compile; nothing was written.", "errors": _errors_since(mark)}
+		"tscn", "tres":
+			var tmp := "user://mixar_validate." + path.get_extension()
+			var f := FileAccess.open(tmp, FileAccess.WRITE)
+			f.store_string(content)
+			f.close()
+			var res = ResourceLoader.load(tmp, "", ResourceLoader.CACHE_MODE_IGNORE)
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(tmp))
+			if res == null:
+				return {"error": "The resource does not load; nothing was written.", "errors": _errors_since(mark)}
+			if path.ends_with(".tscn"):
+				if not (res is PackedScene) or not res.can_instantiate():
+					return {"error": "The scene does not instantiate; nothing was written.", "errors": _errors_since(mark)}
+				var probe_node: Node = res.instantiate()
+				if probe_node == null:
+					return {"error": "The scene does not instantiate; nothing was written.", "errors": _errors_since(mark)}
+				# An unknown node type loads as a MissingNode placeholder.
+				var missing: Array = []
+				for n in [probe_node] + probe_node.find_children("*", "", true, false):
+					if n.get_class() == "MissingNode":
+						missing.append(String(probe_node.get_path_to(n)))
+				probe_node.free()
+				if not missing.is_empty():
+					return {"error": "The scene names node types Godot does not have (%s); nothing was written." % ", ".join(missing),
+						"errors": _errors_since(mark)}
+			if not _errors_since(mark).is_empty():
+				return {"error": "The resource loaded with errors; nothing was written.", "errors": _errors_since(mark)}
+		"json":
+			if JSON.parse_string(content) == null and content.strip_edges() != "null":
+				return {"error": "The JSON does not parse; nothing was written."}
+	return {}
+
+
+func _errors_since(mark: int) -> Array:
+	var out: Array = []
+	for line in log_buffer.since(mark, 20, true).lines:
+		out.append(("%s:%d: " % [line.file, line.line] if line.file != "" else "") + String(line.text))
+	return out
+
+
+func _read_file(args: Dictionary):
+	var path := String(args.get("path", ""))
+	if not path.begins_with("res://") or path.contains("..") or path.begins_with("res://.godot"):
+		return _err("Read a res:// file outside .godot/.")
+	if not FileAccess.file_exists(path):
+		return _err("No such file: " + path)
+	var bytes := FileAccess.get_file_as_bytes(path)
+	if bytes.size() > MAX_READ_BYTES:
+		return _err("%s is %d bytes; Mixar reads files up to %d." % [path, bytes.size(), MAX_READ_BYTES])
+	var text := bytes.get_string_from_utf8()
+	return _ok({"path": path, "content": text, "lines": text.count("\n") + 1})
+
+
+func _list_files(args: Dictionary):
+	var root := String(args.get("dir", MIXAR_DIR)).trim_suffix("/")
+	if not root.begins_with("res://") or root.contains(".."):
+		return _err("List a res:// folder.")
+	var limit := clampi(int(args.get("max_files", 300)), 1, 2000)
+	var out: Array = []
+	var queue: Array = [root]
+	while not queue.is_empty() and out.size() < limit:
+		var dir: String = queue.pop_front()
+		if dir.begins_with("res://.godot"):
+			continue
+		for sub in DirAccess.get_directories_at(dir):
+			if not sub.begins_with("."):
+				queue.append(dir.path_join(sub))
+		for f in DirAccess.get_files_at(dir):
+			if f.ends_with(".import") or f.ends_with(".uid"):
+				continue
+			out.append({"path": dir.path_join(f), "bytes": FileAccess.get_file_as_bytes(dir.path_join(f)).size()
+				if f.get_extension() in TEXT_EXTENSIONS else -1})
+			if out.size() >= limit:
+				break
+	return _ok({"dir": root, "files": out, "truncated": not queue.is_empty()})
+
+
+func _delete_file(args: Dictionary):
+	var path := String(args.get("path", ""))
+	if not path.begins_with(MIXAR_DIR + "/") or path.contains(".."):
+		return _err("Mixar deletes only under %s/." % MIXAR_DIR)
+	if not FileAccess.file_exists(path):
+		return _err("No such file: " + path)
+	if DirAccess.remove_absolute(ProjectSettings.globalize_path(path)) != OK:
+		return _err("Could not delete " + path)
+	EditorInterface.get_resource_filesystem().scan()
+	return _ok({"deleted": path})
+
+
+func _remove_node(args: Dictionary):
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return _err("No scene is open.")
+	if _scene_refusal() != "":
+		return _err(_scene_refusal())
+	var path := String(args.get("node", ""))
+	var node := _scene_node(path)
+	if node == null or node == root:
+		return _err("No removable node at " + path)
+	if node.owner != root:
+		return _err("%s is inside an instanced scene; remove the instance, or hide the node." % path)
+	var parent := node.get_parent()
+	var index := node.get_index()
+	var undo := plugin.get_undo_redo()
+	undo.create_action("Mixar: remove " + node.name)
+	undo.add_do_method(parent, "remove_child", node)
+	undo.add_undo_method(parent, "add_child", node, true)
+	undo.add_undo_method(parent, "move_child", node, index)
+	undo.add_undo_method(node, "set_owner", root)
+	undo.add_undo_reference(node)
+	undo.commit_action()
+	EditorInterface.save_scene()
+	return _ok({"removed": path})
+
+
+func _project_setting(args: Dictionary):
+	var name := String(args.get("name", ""))
+	if not args.has("value"):
+		return _ok({"name": name, "value": var_to_str(ProjectSettings.get_setting(name)) if ProjectSettings.has_setting(name) else null})
+	if not SETTING_PREFIXES.any(func(p): return name.begins_with(p)):
+		return _err("Mixar sets only %s." % ", ".join(SETTING_PREFIXES))
+	var refusal := _settings_refusal("set " + name)
+	if refusal != "":
+		return _err(refusal)
+	var value = args.get("value")
+	if name.begins_with("autoload/"):
+		var singleton := name.trim_prefix("autoload/")
+		if value == null:
+			plugin.remove_autoload_singleton(singleton)
+			ProjectSettings.save()
+			return _ok({"name": name, "removed": true})
+		if not String(value).begins_with("res://") or not ResourceLoader.exists(String(value)):
+			return _err("An autoload is an existing res:// script or scene.")
+		plugin.add_autoload_singleton(singleton, String(value))
+		ProjectSettings.save()
+		return _ok({"name": name, "value": String(value)})
+	if name.begins_with("input/"):
+		if value == null:
+			ProjectSettings.clear(name)
+		else:
+			var events := _input_events(value)
+			if events.is_empty():
+				return _err("An input action is {keys: [\"W\", \"Up\"], mouse: [\"left\"]} with at least one key or button.")
+			ProjectSettings.set_setting(name, {"deadzone": float(value.get("deadzone", 0.2)) if typeof(value) == TYPE_DICTIONARY else 0.2,
+				"events": events})
+	else:
+		var current = ProjectSettings.get_setting(name)
+		ProjectSettings.set_setting(name, _coerce(value, current) if current != null else value)
+	if ProjectSettings.save() != OK:
+		return _err("Saving project.godot failed.")
+	return _ok({"name": name, "value": var_to_str(ProjectSettings.get_setting(name)).left(300) if ProjectSettings.has_setting(name) else null})
+
+
+func _input_events(value) -> Array:
+	var spec: Dictionary = value if typeof(value) == TYPE_DICTIONARY else {"keys": value if typeof(value) == TYPE_ARRAY else [value]}
+	var events: Array = []
+	for key in spec.get("keys", []):
+		var code := OS.find_keycode_from_string(String(key))
+		if code != KEY_NONE:
+			var e := InputEventKey.new()
+			e.physical_keycode = code
+			events.append(e)
+	for button in spec.get("mouse", []):
+		var index := {"left": MOUSE_BUTTON_LEFT, "right": MOUSE_BUTTON_RIGHT, "middle": MOUSE_BUTTON_MIDDLE}.get(String(button).to_lower(), 0)
+		if index:
+			var m := InputEventMouseButton.new()
+			m.button_index = index
+			events.append(m)
+	return events
 
 
 func _add_node(args: Dictionary):
@@ -534,6 +747,7 @@ func _set_property(args: Dictionary):
 	var prop := String(args.get("property", ""))
 	if prop == "" or not (prop in node):
 		return _err("%s (%s) has no property '%s'." % [path, node.get_class(), prop])
+	_make_editable(node)
 	var current = node.get(prop)
 	var value = _coerce(args.get("value"), current)
 	if value is String and value.begins_with("res://") and (prop == "script" or current == null or current is Resource):
@@ -547,6 +761,19 @@ func _set_property(args: Dictionary):
 	undo.commit_action()
 	EditorInterface.save_scene()
 	return _ok({"node": path, "property": prop, "value": var_to_str(node.get(prop)).left(200)})
+
+
+## A node inside a placed package is saved only when its instance is
+## "editable children": turn that on for the instance that holds it.
+func _make_editable(node: Node) -> void:
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null or node == root or node.owner == root:
+		return
+	var inst := node.owner
+	while inst != null and inst.owner != root and inst != root:
+		inst = inst.owner
+	if inst != null and inst != root and not root.is_editable_instance(inst):
+		root.set_editable_instance(inst, true)
 
 
 func _build_web():

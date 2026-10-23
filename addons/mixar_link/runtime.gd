@@ -116,10 +116,12 @@ func _playtest(request_id: int, steps: Array) -> void:
 			await _wait(clampf(float(step.wait), 0.0, 30.0))
 		elif step.has("walk_to"):
 			result = await _walk_to(C.to_godot(step.walk_to), clampf(float(step.get("timeout", 15.0)), 1.0, 60.0))
+		elif step.has("inspect"):
+			result = _inspect(step.inspect)
 		elif step.has("prove_loop"):
 			result = await _prove_loop(clampf(float(step.get("timeout", 15.0)), 1.0, 60.0))
 		elif not step.has("state"):
-			result["error"] = "unknown step; use hold, press, wait, walk_to, prove_loop or state"
+			result["error"] = "unknown step; use hold, press, wait, walk_to, prove_loop, inspect or state"
 		result["step"] = step
 		result["state"] = _state()
 		results.append(result)
@@ -294,6 +296,34 @@ func _prove_loop(timeout_each: float) -> Dictionary:
 		unreached.append(String(goal.name))
 	var won: bool = bool(_state().get("won", false))
 	return {"visits": visits, "unreached": unreached, "won": won}
+
+
+## {node: "Name" or "Path/To/Node", properties: [...]} → their current values
+## (positions in the Blender frame), read in the running game.
+func _inspect(spec) -> Dictionary:
+	if typeof(spec) != TYPE_DICTIONARY or String(spec.get("node", "")) == "":
+		return {"error": "inspect needs {node, properties}"}
+	var level := get_tree().current_scene
+	var name := String(spec.node)
+	var node: Node = level.get_node_or_null(NodePath(name)) if name.contains("/") else level.find_child(name, true, false)
+	if node == null and level.name == name:
+		node = level
+	if node == null:
+		return {"error": "no node '%s' in the running game" % name}
+	var values := {}
+	for prop in spec.get("properties", ["global_position"]):
+		var key := String(prop)
+		if not (key in node):
+			values[key] = "<no such property>"
+			continue
+		var v = node.get(key)
+		if v is Vector3:
+			values[key] = C.to_blender(v)
+		elif typeof(v) in [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_STRING_NAME]:
+			values[key] = v
+		else:
+			values[key] = var_to_str(v).left(200)
+	return {"node": String(level.get_path_to(node)), "type": node.get_class(), "values": values}
 
 
 func _state() -> Dictionary:

@@ -24,4 +24,5 @@ func _ready() -> void:
 
 func _refresh(game) -> void:
 	_count.text = "Collected %d / %d" % [game.collected, game.total] if game.total else ""
-	_banner.visible = game.won
+	_banner.text = "Game over" if game.lost else "You win!"
+	_banner.visible = game.won or game.lost

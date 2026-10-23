@@ -529,6 +529,86 @@ def main() -> int:
               "an unknown action stops the playtest", res[-1] if res else None)
         client.call("stop")
 
+        # --- full scripting: files, settings, custom gameplay ----------------------
+        r = client.call("list_files", {"dir": "res://addons/mixar_link/templates"})
+        check(not r["isError"] and any(f["path"].endswith("game.gd") for f in r["structuredContent"]["files"]),
+              "list_files", r)
+        r = client.call("read_file", {"path": "res://addons/mixar_link/templates/game.gd"})
+        check(not r["isError"] and "on_mixar_event" in r["structuredContent"]["content"], "read_file", r)
+        r = client.call("read_file", {"path": "res://.godot/editor/filesystem_cache10"})
+        check(r["isError"], "read_file refuses the .godot cache")
+        r = client.call("write_file", {"path": "res://addons/evil.gd", "content": "extends Node"})
+        check(r["isError"] and "res://mixar" in r["content"][0]["text"], "write_file keeps to res://mixar")
+        countdown = (
+            "extends Node\n"
+            "## A countdown: reports time_left; at zero the game is lost.\n"
+            "@export var seconds := 30.0\n"
+            "func _ready() -> void:\n"
+            "\tadd_to_group(\"mixar_state\")\n"
+            "func _process(delta: float) -> void:\n"
+            "\tif seconds > 0.0:\n"
+            "\t\tseconds = maxf(0.0, seconds - delta)\n"
+            "\t\tif seconds == 0.0:\n"
+            "\t\t\tget_tree().call_group(\"mixar_game\", \"on_mixar_event\", \"lose\", self)\n"
+            "func mixar_state() -> Dictionary:\n"
+            "\treturn {\"time_left\": snappedf(seconds, 0.1)}\n")
+        r = client.call("write_file", {"path": "res://mixar/scripts/countdown.gd", "content": countdown})
+        check(not r["isError"], "write_file a gameplay script", r)
+        lift = ("extends AnimatableBody3D\n"
+                "var _t := 0.0\n"
+                "func _physics_process(delta: float) -> void:\n"
+                "\t_t += delta\n"
+                "\tposition.y = 1.0 + sin(_t * 2.0)\n")
+        check(not client.call("write_file", {"path": "res://mixar/scripts/lift.gd", "content": lift})["isError"],
+              "write_file a platform script")
+        bad_scene = '[gd_scene format=3]\n\n[node name="X" type="NotAType"]\n'
+        r = client.call("write_file", {"path": "res://mixar/scenes/bad.tscn", "content": bad_scene})
+        check(r["isError"] and not os.path.exists(os.path.join(project, "mixar", "scenes", "bad.tscn")),
+              "a scene that does not load is not written", r)
+        good_scene = ('[gd_scene load_steps=2 format=3]\n\n'
+                      '[ext_resource type="Script" path="res://mixar/scripts/lift.gd" id="1"]\n\n'
+                      '[node name="Lift" type="AnimatableBody3D"]\nscript = ExtResource("1")\n')
+        r = client.call("write_file", {"path": "res://mixar/scenes/lift.tscn", "content": good_scene})
+        check(not r["isError"], "write_file a scene", r)
+        r = client.call("add_node", {"type": "Node", "name": "Countdown", "script": "res://mixar/scripts/countdown.gd"})
+        check(not r["isError"], "attach the countdown", r)
+        r = client.call("place", {"scene": "res://mixar/scenes/lift.tscn", "name": "Lift", "position": [6, 0, 0]})
+        check(not r["isError"], "place the written lift scene", r)
+        r = client.call("set_property", {"node": "Countdown", "property": "seconds", "value": 4.0})
+        check(not r["isError"], "set the countdown's exported seconds", r)
+        r = client.call("set_property", {"node": "Ruins/Relic1", "property": "visible", "value": True})
+        check(not r["isError"], "set a property inside a placed package (editable children)", r)
+        r = client.call("project_setting", {"name": "input/dash", "value": {"keys": ["Shift"], "mouse": ["right"]}})
+        check(not r["isError"] and "dash=" in open(os.path.join(project, "project.godot")).read(),
+              "project_setting adds an input action", r)
+        r = client.call("project_setting", {"name": "autoload/Score", "value": "res://mixar/scripts/countdown.gd"})
+        check(not r["isError"] and "Score=" in open(os.path.join(project, "project.godot")).read(),
+              "project_setting adds an autoload", r)
+        client.call("project_setting", {"name": "autoload/Score", "value": None})
+        r = client.call("project_setting", {"name": "network/limits/x", "value": 1})
+        check(r["isError"], "project_setting refuses settings outside its list")
+        r = client.call("remove_node", {"node": "Marker"})
+        check(not r["isError"], "remove_node", r)
+        r = client.call("play", {"scene": "main"}, timeout=60)
+        r = client.call("playtest", {"steps": [
+            {"wait": 0.5}, {"inspect": {"node": "Lift", "properties": ["global_position"]}},
+            {"wait": 0.7}, {"inspect": {"node": "Lift", "properties": ["global_position"]}},
+            {"wait": 4.0}, {"state": True}]}, timeout=120)
+        res = r["structuredContent"]["steps"] if not r["isError"] else []
+        z0 = res[1]["values"]["global_position"][2] if len(res) > 1 and "values" in res[1] else None
+        z1 = res[3]["values"]["global_position"][2] if len(res) > 3 and "values" in res[3] else None
+        check(z0 is not None and z1 is not None and abs(z1 - z0) > 0.2, "the written lift moves in the game", (z0, z1))
+        final = res[5]["state"] if len(res) > 5 else {}
+        check(final.get("time_left") == 0.0 and final.get("lost") is True,
+              "the written countdown reports time_left and loses the game", final)
+        errors = client.call("log", {"since": r["structuredContent"].get("steps", [{}])[0].get("seq", 0) if False else 0,
+                                     "errors_only": True})["structuredContent"]["lines"]
+        check(not any("countdown.gd" in l["file"] or "lift.gd" in l["file"] for l in errors),
+              "the written scripts raise no errors", [l["text"] for l in errors][-5:])
+        client.call("stop")
+        client.call("remove_node", {"node": "Countdown"})
+        client.call("remove_node", {"node": "Lift"})
+
         # prove_loop on a fresh run: every pickup, then the goal, unaided.
         r = client.call("play", {"scene": "main"}, timeout=60)
         r = client.call("playtest", {"steps": [{"wait": 1.0}, {"prove_loop": True, "timeout": 12}]}, timeout=200)

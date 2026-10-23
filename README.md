@@ -45,10 +45,14 @@ after `initialize`).
 | `play` / `stop` | Runs the game from the editor and waits for it to connect; stops it |
 | `capture` | A JPEG frame of the running game, or of the editor's 3D viewport |
 | `log` | Editor and game log lines after a sequence number; `errors_only` filters |
-| `playtest` | Scripted steps in the running game (`hold`/`press` an input action, `wait`, `walk_to` a point, `prove_loop`, `state`) with the game state after each. `walk_to` follows a navigation mesh baked from the level's colliders at that moment (`no_path` when nothing connects); `prove_loop` visits every pickup nearest-first, then the goal, and reports `won` and what it could not reach |
+| `playtest` | Scripted steps in the running game (`hold`/`press` an input action, `wait`, `walk_to` a point, `prove_loop`, `inspect` a node's live properties, `state`) with the game state after each. `walk_to` follows a navigation mesh baked from the level's colliders at that moment (`no_path` when nothing connects); `prove_loop` visits every pickup nearest-first, then the goal, and reports `won` and what it could not reach |
 | `write_script` | Writes a GDScript under `res://mixar/scripts/`, compiled first (a script that fails is not written) |
 | `add_node` / `set_property` | Adds a built-in node (optionally scripted) / sets a property, with undo, then saves |
 | `build_web` | Exports a no-threads web build into `res://mixar_build/web/` (needs Godot's export templates) |
+| `read_file` / `list_files` | Any project text file (not the `.godot` cache) / a folder's files |
+| `write_file` / `delete_file` | Text files under `res://mixar/`, checked first: `.gd` must compile, `.tscn`/`.tres` must load with every node type known, `.json` must parse. A file that fails is not written and the errors come back |
+| `remove_node` | Removes a node from the open scene (undo) |
+| `project_setting` | Reads any setting; in owned projects sets input actions (`{keys, mouse}`), autoloads, the main scene, window, physics, environment defaults and layer names |
 | `build_info` | The last web build's files and folder, for the Mixar desktop to upload a share |
 
 `new_scene` takes a `template` that wraps the level in a game: a player, a game
@@ -93,6 +97,12 @@ import, the add-on gives each tagged node its tags as metadata, groups
 | `spawn` | The player's start |
 | `trigger` | Tells the game manager (`on_mixar_event`) |
 
+Custom scripts use the same game manager: `get_tree().call_group("mixar_game",
+"on_mixar_event", "<event>", self)` with `pickup`, `hazard`, `checkpoint`, `goal`,
+`lose` or `restart`. They report their own values (a timer, a score) by joining
+the group `mixar_state` and returning a Dictionary from `mixar_state()`; playtests
+see those values in the game state.
+
 Positions use Blender's frame (Z up, metres), the frame Mixar works in. Blender
 `(x, y, z)` is Godot `(x, z, -y)`, and a yaw about Blender Z is the same angle about
 Godot Y.
@@ -104,7 +114,7 @@ extras. Godot reads the extras as node metadata.
 ## Test
 
 ```sh
-python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (75 checks: plays levels to a win, plugin mode)
+python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (95 checks: plays levels to a win, scripted gameplay, plugin mode)
 python3 test/run_e2e.py --godot /path/to/Godot --windowed-game   # also checks a real frame
 ```
 
