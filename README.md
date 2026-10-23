@@ -49,6 +49,7 @@ after `initialize`).
 | `write_script` | Writes a GDScript under `res://mixar/scripts/`, compiled first (a script that fails is not written) |
 | `add_node` / `set_property` | Adds a built-in node (optionally scripted) / sets a property, with undo, then saves |
 | `build_web` | Exports a no-threads web build into `res://mixar_build/web/` (needs Godot's export templates) |
+| `build_info` | The last web build's files and folder, for the Mixar desktop to upload a share |
 
 `new_scene` takes `template: "third_person"`: a player (WASD/arrows, Space jumps,
 Q/E turn the camera), a game manager and a HUD around the level, plus the input map.
@@ -80,7 +81,7 @@ extras. Godot reads the extras as node metadata.
 ## Test
 
 ```sh
-python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (53 checks, plays a level to a win)
+python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (55 checks, plays a level to a win)
 python3 test/run_e2e.py --godot /path/to/Godot --windowed-game   # also checks a real frame
 ```
 

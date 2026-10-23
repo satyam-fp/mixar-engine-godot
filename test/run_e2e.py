@@ -386,6 +386,17 @@ def main() -> int:
         r = client.call("build_web")
         check(r["isError"] and "export templates" in r["content"][0]["text"] or not r["isError"],
               "build_web without templates says how to install them", r)
+        if r["isError"]:
+            r = client.call("build_info")
+            check(r["isError"] and "build_web first" in r["content"][0]["text"], "build_info without a build")
+            web = os.path.join(project, "mixar_build", "web")
+            os.makedirs(web, exist_ok=True)
+            for name, data in (("index.html", b"<html></html>"), ("index.wasm", b"\0asm1234")):
+                open(os.path.join(web, name), "wb").write(data)
+        r = client.call("build_info")
+        files = {f["name"]: f["bytes"] for f in r["structuredContent"].get("files", [])}
+        check(not r["isError"] and files.get("index.html") and os.path.isabs(r["structuredContent"]["dir"]),
+              "build_info lists the build", r)
 
         r = client.call("play", {"scene": "main"}, timeout=60)
         check(not r["isError"], "play the ruins", r)

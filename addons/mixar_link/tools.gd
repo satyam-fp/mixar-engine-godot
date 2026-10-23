@@ -76,6 +76,8 @@ func list_tools() -> Array:
 			{"node": {"type": "string"}, "property": {"type": "string"}, "value": {}}, ["node", "property", "value"]),
 		_tool("build_web", "Export the project for the web (HTML5) into res://mixar_build/web/; needs Godot's export templates installed.",
 			{}),
+		_tool("build_info", "The last web build's files and its absolute folder (for the Mixar desktop to upload a share).",
+			{}),
 	]
 
 
@@ -105,6 +107,7 @@ func call_tool(name: String, args: Dictionary) -> Dictionary:
 		"add_node": result = _add_node(args)
 		"set_property": result = _set_property(args)
 		"build_web": result = await _build_web()
+		"build_info": result = _build_info()
 		_: return _err("Unknown tool: " + name)
 	if typeof(result) != TYPE_DICTIONARY:
 		return _err("%s failed inside Godot; see the Output panel." % name)
@@ -553,6 +556,16 @@ func _build_web():
 		total += FileAccess.get_file_as_bytes(out.path_join(f)).size()
 	return _ok({"folder": BUILD_DIR + "/web", "entry": "index.html", "files": files, "bytes": total,
 		"seconds": snappedf((Time.get_ticks_msec() - t0) / 1000.0, 0.1)})
+
+
+func _build_info():
+	var out := ProjectSettings.globalize_path(BUILD_DIR.path_join("web"))
+	if not FileAccess.file_exists(out.path_join("index.html")):
+		return _err("There is no web build yet; call build_web first.")
+	var files: Array = []
+	for f in DirAccess.get_files_at(out):
+		files.append({"name": f, "bytes": FileAccess.get_file_as_bytes(out.path_join(f)).size()})
+	return _ok({"dir": out, "files": files})
 
 
 func _ensure_web_preset() -> void:
