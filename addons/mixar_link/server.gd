@@ -156,7 +156,17 @@ func _handle(c: Dictionary, req: Dictionary) -> void:
 		_:
 			_respond(c, 200, {}, _rpc_error(id, -32601, "Method not found: " + method))
 			return
-	_respond(c, 200, extra, JSON.stringify({"jsonrpc": "2.0", "id": id, "result": result}))
+	_respond(c, 200, extra, json_safe(JSON.stringify({"jsonrpc": "2.0", "id": id, "result": result})))
+
+
+## JSON.stringify leaves control characters (a log line's ANSI colour codes)
+## raw inside strings, which is invalid JSON; escape every one that is left.
+static func json_safe(text: String) -> String:
+	for code in 32:
+		var ch := char(code)
+		if text.contains(ch):
+			text = text.replace(ch, "\\u%04x" % code)
+	return text
 
 
 func _rpc_error(id, code: int, message: String) -> String:

@@ -53,7 +53,10 @@ enabled=PackedStringArray("res://addons/mixar_link/plugin.cfg")
 TEST_PRINTER = """extends Node
 func _ready() -> void:
 	print("MIXAR_TEST_GAME_READY")
+	print("\\u001b[31mMIXAR_ANSI_RED\\u001b[0m")
 	push_error("MIXAR_TEST_ERROR")
+	if OS.get_environment("MIXAR_TEST_MINIMISE") == "1" and DisplayServer.get_name() != "headless":
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED)
 """
 
 
@@ -322,7 +325,8 @@ def main() -> int:
                                            "collision": {"shape": "convex",
                                                          "nodes": ["Crate_col-convcolonly"]}}]}}, fh)
 
-    env = dict(os.environ, HOME=home)
+    # --windowed-game minimises the game window at once: capture must still draw.
+    env = dict(os.environ, HOME=home, MIXAR_TEST_MINIMISE="1" if args.windowed_game else "0")
     log_path = os.path.join(tmp, "godot.log")
     log = open(log_path, "w")
     # The first run imports the project; the editor then loads the plugin.
@@ -421,15 +425,19 @@ def main() -> int:
               [l["text"] for l in lines][-10:])
         check(any("MIXAR_TEST_ERROR" in l["text"] and l["level"] == "error" for l in game),
               "game errors reach the log as errors")
+        everything = client.call("log", {"since": 0, "max_lines": 1000})["structuredContent"]["lines"]
+        check(any(l["text"] == "MIXAR_ANSI_RED" for l in everything),
+              "ANSI colour codes are stripped and the reply is valid JSON",
+              [l["text"] for l in everything if "ANSI" in l["text"]])
         errs = client.call("log", {"since": seq, "errors_only": True})["structuredContent"]["lines"]
         check(errs and all(l["level"] != "info" for l in errs), "errors_only filters")
         r = client.call("capture", {"source": "game"}, timeout=30)
-        if r["isError"] or args.windowed_game:
-            check(not args.windowed_game and "headless" in r["content"][0]["text"],
-                  "capture of a headless game says why", r)
+        if args.windowed_game:
+            img = next((c for c in r.get("content", []) if c.get("type") == "image"), None)
+            check(not r["isError"] and img and base64.b64decode(img["data"])[:2] == b"\xff\xd8",
+                  "a minimised game window is still captured (forced draw)", r if r["isError"] else "")
         else:
-            img = next(c for c in r["content"] if c["type"] == "image")
-            check(base64.b64decode(img["data"])[:2] == b"\xff\xd8", "capture returns a JPEG")
+            check(r["isError"] and "headless" in r["content"][0]["text"], "capture of a headless game says why", r)
         r = client.call("stop")
         check(not r["isError"] and not r["structuredContent"]["playing"], "stop", r)
         r = client.call("capture", {"source": "game"})

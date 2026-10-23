@@ -74,7 +74,19 @@ func _capture(request_id: int, max_width: int) -> void:
 	if DisplayServer.get_name() == "headless":
 		EngineDebugger.send_message("mixar:frame", [request_id, PackedByteArray(), 0, 0])
 		return
-	await RenderingServer.frame_post_draw
+	# A window behind another app (or minimised) is not drawn, so
+	# frame_post_draw may never come: wait a moment, then draw it ourselves.
+	var drawn := [false]
+	var mark := func(): drawn[0] = true
+	RenderingServer.frame_post_draw.connect(mark, CONNECT_ONE_SHOT)
+	for i in 30:
+		await get_tree().process_frame
+		if drawn[0]:
+			break
+	if not drawn[0]:
+		if RenderingServer.frame_post_draw.is_connected(mark):
+			RenderingServer.frame_post_draw.disconnect(mark)
+		RenderingServer.force_draw(false)
 	var image := get_viewport().get_texture().get_image()
 	if image == null or image.is_empty():
 		EngineDebugger.send_message("mixar:frame", [request_id, PackedByteArray(), 0, 0])

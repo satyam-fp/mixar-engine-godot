@@ -9,6 +9,7 @@ extends Logger
 const MAX_LINES := 2000
 
 var source := "editor"
+var _ansi := RegEx.create_from_string("\u001b\\[[0-9;]*[A-Za-z]")
 var _mutex := Mutex.new()
 var _lines: Array = []
 var _seq := 0
@@ -29,9 +30,11 @@ func _log_error(function: String, file: String, line: int, code: String, rationa
 
 
 func add(src: String, level: String, text: String, file: String, line: int) -> void:
+	_mutex.lock()  # loggers are called from any thread; the RegEx is shared
+	text = _ansi.sub(text, "", true).strip_edges()
 	if text == "":
+		_mutex.unlock()
 		return
-	_mutex.lock()
 	_seq += 1
 	_lines.append({"seq": _seq, "source": src, "level": level, "text": text.left(2000),
 		"file": file, "line": line})
