@@ -45,6 +45,29 @@ after `initialize`).
 | `play` / `stop` | Runs the game from the editor and waits for it to connect; stops it |
 | `capture` | A JPEG frame of the running game, or of the editor's 3D viewport |
 | `log` | Editor and game log lines after a sequence number; `errors_only` filters |
+| `playtest` | Scripted steps in the running game (`hold`/`press` an input action, `wait`, `walk_to` a point, `state`) with the game state after each |
+| `write_script` | Writes a GDScript under `res://mixar/scripts/`, compiled first (a script that fails is not written) |
+| `add_node` / `set_property` | Adds a built-in node (optionally scripted) / sets a property, with undo, then saves |
+| `build_web` | Exports a no-threads web build into `res://mixar_build/web/` (needs Godot's export templates) |
+
+`new_scene` takes `template: "third_person"`: a player (WASD/arrows, Space jumps,
+Q/E turn the camera), a game manager and a HUD around the level, plus the input map.
+
+## Game tags
+
+Packages exported with `engine="godot"` carry `mixar_*` tags as glTF extras. On
+import, the add-on gives each tagged node its tags as metadata, groups
+(`mixar_<role>`, …) and a component script (`addons/mixar_link/game/`):
+
+| Role | In the game |
+| --- | --- |
+| `pickup` | Spins; collected on touch |
+| `door` | Opens (hinge or slide, `mixar_pivot`) once every pickup is collected |
+| `goal` | Wins once the doors are open |
+| `hazard` / `enemy` | Respawns the player; patrols with a `slide_*` pivot |
+| `checkpoint` | Moves the respawn point |
+| `spawn` | The player's start |
+| `trigger` | Tells the game manager (`on_mixar_event`) |
 
 Positions use Blender's frame (Z up, metres), the frame Mixar works in. Blender
 `(x, y, z)` is Godot `(x, z, -y)`, and a yaw about Blender Z is the same angle about
@@ -57,7 +80,7 @@ extras. Godot reads the extras as node metadata.
 ## Test
 
 ```sh
-python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game
+python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (53 checks, plays a level to a win)
 python3 test/run_e2e.py --godot /path/to/Godot --windowed-game   # also checks a real frame
 ```
 
