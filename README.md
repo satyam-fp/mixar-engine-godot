@@ -60,6 +60,23 @@ manager, a HUD and the input map. Space jumps in all three:
 | `top_down` | A camera high above; WASD / arrows move north/south/west/east |
 | `platformer` | A side view (from Blender -Y): A / D run along Blender X, the player keeps its lane |
 
+## Studio projects (plugin mode)
+
+In an existing project, set this in `project.godot` (Project Settings, advanced):
+
+```ini
+[mixar_link]
+project_mode="plugin"
+editable_scenes=PackedStringArray("res://levels/shared.tscn")
+```
+
+In plugin mode Mixar keeps to `res://mixar/`. It never changes project settings
+(main scene, input map, export presets), and it edits only levels under
+`res://mixar/` or listed in `editable_scenes`. Everything else is refused with a
+message saying what the studio can do instead. The agent cannot change the mode.
+Enabling the add-on still registers its `MixarLink` autoload. The default,
+`"owned"`, is for games Mixar builds from scratch.
+
 ## Game tags
 
 Packages exported with `engine="godot"` carry `mixar_*` tags as glTF extras. On
@@ -87,7 +104,7 @@ extras. Godot reads the extras as node metadata.
 ## Test
 
 ```sh
-python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (62 checks: plays levels to a win)
+python3 test/run_e2e.py --godot /path/to/Godot            # headless editor and game (75 checks: plays levels to a win, plugin mode)
 python3 test/run_e2e.py --godot /path/to/Godot --windowed-game   # also checks a real frame
 ```
 

@@ -208,6 +208,83 @@ class Client:
 FAILURES: list[str] = []
 
 
+def launch(godot: str, project: str, home: str, log_path: str):
+    """Start a headless editor on `project`; (process, Client, log file) once its
+    discovery file appears, or (process, None, log file)."""
+    log = open(log_path, "w")
+    proc = subprocess.Popen([godot, "--headless", "--editor", "--path", project],
+                            env=dict(os.environ, HOME=home), stdout=log, stderr=subprocess.STDOUT)
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        found = glob.glob(os.path.join(home, ".mixar", "engine-link", "godot-*.json"))
+        if found:
+            time.sleep(0.5)
+            info = json.load(open(found[0]))
+            client = Client(info["port"], info["token"])
+            client.initialize()
+            return proc, client, log
+        if proc.poll() is not None:
+            break
+        time.sleep(0.5)
+    return proc, None, log
+
+
+def plugin_mode_checks(godot: str, tmp: str) -> None:
+    """A studio's existing project (plugin mode): Mixar keeps to res://mixar/."""
+    home = os.path.join(tmp, "home-plugin")
+    project = os.path.join(tmp, "studio")
+    os.makedirs(home)
+    os.makedirs(project)
+    shutil.copytree(os.path.join(ROOT, "addons"), os.path.join(project, "addons"))
+    with open(os.path.join(project, "project.godot"), "w") as fh:
+        fh.write(PROJECT_GODOT.replace("[autoload]\n\nTestPrinter=\"*res://test_printer.gd\"\n", "")
+                 + '\n[mixar_link]\n\nproject_mode="plugin"\neditable_scenes=PackedStringArray("res://shared.tscn")\n')
+    for name in ("studio_level.tscn", "shared.tscn"):
+        with open(os.path.join(project, name), "w") as fh:
+            fh.write('[gd_scene format=3]\n\n[node name="Root" type="Node3D"]\n')
+    package = os.path.join(tmp, "Mixar Exports", "Crate")
+    proc, client, log = launch(godot, project, home, os.path.join(tmp, "godot-plugin.log"))
+    try:
+        check(client is not None, "plugin-mode editor connects")
+        if client is None:
+            return
+        check(client.call("status")["structuredContent"].get("project_mode") == "plugin", "status reports plugin mode")
+        before = open(os.path.join(project, "project.godot")).read()
+        r = client.call("new_scene", {"name": "Arena", "set_main": True})
+        check(r["isError"] and "plugin mode" in r["content"][0]["text"], "plugin mode refuses to set the main scene", r)
+        r = client.call("new_scene", {"name": "Arena", "set_main": False, "template": "top_down"})
+        check(r["isError"] and "input actions" in r["content"][0]["text"],
+              "plugin mode refuses to add input actions", r)
+        r = client.call("new_scene", {"name": "Arena", "set_main": False})
+        check(not r["isError"], "plugin mode still builds levels under res://mixar", r)
+        r = client.call("import_package", {"source_dir": package, "folder": "Crate"})
+        check(not r["isError"], "plugin mode imports packages into res://mixar", r)
+        r = client.call("place", {"scene": "res://mixar/Crate/Crate.glb"})
+        check(not r["isError"], "plugin mode places into its own level", r)
+        client.call("open_scene", {"scene": "res://studio_level.tscn"})
+        r = client.call("place", {"scene": "res://mixar/Crate/Crate.glb"})
+        check(r["isError"] and "editable_scenes" in r["content"][0]["text"],
+              "plugin mode refuses to edit the studio's own level", r)
+        r = client.call("set_property", {"node": ".", "property": "visible", "value": False})
+        check(r["isError"], "plugin mode refuses set_property on the studio's level")
+        client.call("open_scene", {"scene": "res://shared.tscn"})
+        r = client.call("place", {"scene": "res://mixar/Crate/Crate.glb"})
+        check(not r["isError"], "plugin mode edits a level the studio listed", r)
+        r = client.call("build_web")
+        check(r["isError"], "plugin mode build_web is refused (templates or preset)")
+        check("Crate" not in open(os.path.join(project, "studio_level.tscn")).read(), "the studio level is untouched")
+        after = open(os.path.join(project, "project.godot")).read()
+        check("run/main_scene" not in after and "move_forward" not in after and before == after,
+              "project.godot is untouched")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+
+
 def check(cond, label, detail=""):
     print(("PASS " if cond else "FAIL ") + label + (f"  [{detail}]" if detail and not cond else ""))
     if not cond:
@@ -486,6 +563,9 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
         log.close()
+    try:
+        plugin_mode_checks(args.godot, tmp)
+    finally:
         if FAILURES or args.keep:
             print(f"temp folder kept: {tmp} (editor log: {log_path})")
         else:

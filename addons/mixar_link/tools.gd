@@ -8,7 +8,13 @@ extends RefCounted
 ## Mixar works in: Blender (x, y, z) is Godot (x, z, -y), and a yaw about
 ## Blender's Z is the same angle about Godot's Y.
 
-const ADAPTER_VERSION := "0.1.0"
+const ADAPTER_VERSION := "0.2.0"
+## Project settings the STUDIO sets (never the agent): "owned" (default, a
+## Mixar-made game) or "plugin" (an existing project: Mixar keeps to
+## res://mixar/, never edits project settings, and edits only levels under
+## res://mixar/ or listed in mixar_link/editable_scenes).
+const MODE_SETTING := "mixar_link/project_mode"
+const EDITABLE_SETTING := "mixar_link/editable_scenes"
 const MIXAR_DIR := "res://mixar"
 const IMPORT_TIMEOUT_MS := 120000
 const PLAY_TIMEOUT_MS := 20000
@@ -134,6 +140,7 @@ func _status() -> Dictionary:
 		"adapter_version": ADAPTER_VERSION,
 		"mixar_folder": MIXAR_DIR,
 		"log_seq": log_buffer.latest(),
+		"project_mode": _mode(),
 	})
 
 
@@ -192,6 +199,10 @@ func _new_scene(args: Dictionary):
 	var template := String(args.get("template", ""))
 	if template != "" and not TEMPLATES.has(template):
 		return _err("Unknown template '%s' (templates: %s)." % [template, ", ".join(TEMPLATES.keys())])
+	if bool(args.get("set_main", false)) and _settings_refusal("make this the main scene") != "":
+		return _err(_settings_refusal("make this the main scene"))
+	if template != "" and _missing_actions().size() > 0 and _settings_refusal("add the input actions %s" % ", ".join(_missing_actions())) != "":
+		return _err(_settings_refusal("add the input actions %s" % ", ".join(_missing_actions())))
 	var root := Node3D.new()
 	root.name = name
 	if bool(args.get("with_defaults", true)):
@@ -283,6 +294,8 @@ func _place(args: Dictionary):
 	var root := EditorInterface.get_edited_scene_root()
 	if root == null:
 		return _err("No scene is open; call new_scene or open_scene first.")
+	if _scene_refusal() != "":
+		return _err(_scene_refusal())
 	var path := String(args.get("scene", ""))
 	if not path.begins_with("res://") or not ResourceLoader.exists(path):
 		return _err("No such resource: " + path + " (import_package returns main_scene).")
@@ -343,6 +356,8 @@ func _scene_tree(args: Dictionary):
 func _save_scene():
 	if EditorInterface.get_edited_scene_root() == null:
 		return _err("No scene is open.")
+	if _scene_refusal() != "":
+		return _err(_scene_refusal())
 	return _ok({"saved": EditorInterface.save_scene() == OK})
 
 
@@ -472,6 +487,8 @@ func _add_node(args: Dictionary):
 	var root := EditorInterface.get_edited_scene_root()
 	if root == null:
 		return _err("No scene is open.")
+	if _scene_refusal() != "":
+		return _err(_scene_refusal())
 	var type := String(args.get("type", ""))
 	if not ClassDB.class_exists(type) or not ClassDB.is_parent_class(type, "Node") or not ClassDB.can_instantiate(type) \
 			or ClassDB.is_parent_class(type, "EditorPlugin"):
@@ -508,6 +525,8 @@ func _add_node(args: Dictionary):
 
 
 func _set_property(args: Dictionary):
+	if _scene_refusal() != "":
+		return _err(_scene_refusal())
 	var path := String(args.get("node", ""))
 	var node := _scene_node(path)
 	if node == null:
@@ -537,6 +556,8 @@ func _build_web():
 	if not (FileAccess.file_exists(templates.path_join("web_nothreads_release.zip"))
 			or FileAccess.file_exists(templates.path_join("web_release.zip"))):
 		return _err("Godot's web export templates (%s) are not installed: Editor > Manage Export Templates > Download and Install, then build_web again." % folder)
+	if not _has_web_preset() and _settings_refusal("add a Web export preset") != "":
+		return _err(_settings_refusal("add a Web export preset"))
 	_ensure_web_preset()
 	var build := ProjectSettings.globalize_path(BUILD_DIR)
 	var out := build.path_join("web")
@@ -599,6 +620,21 @@ func _ensure_web_preset() -> void:
 	cfg.save("res://export_presets.cfg")
 
 
+func _missing_actions() -> Array:
+	return INPUT_ACTIONS.keys().filter(func(a): return not ProjectSettings.has_setting("input/" + a))
+
+
+func _has_web_preset() -> bool:
+	var cfg := ConfigFile.new()
+	cfg.load("res://export_presets.cfg")
+	var index := 0
+	while cfg.has_section("preset.%d" % index):
+		if cfg.get_value("preset.%d" % index, "name", "") == "Web":
+			return true
+		index += 1
+	return false
+
+
 func _ensure_input_map() -> void:
 	var changed := false
 	for action in INPUT_ACTIONS:
@@ -614,6 +650,31 @@ func _ensure_input_map() -> void:
 		changed = true
 	if changed:
 		ProjectSettings.save()
+
+
+func _mode() -> String:
+	return "plugin" if String(ProjectSettings.get_setting(MODE_SETTING, "owned")) == "plugin" else "owned"
+
+
+## In plugin mode: why Mixar may not change project settings for `what`, else "".
+func _settings_refusal(what: String) -> String:
+	if _mode() != "plugin":
+		return ""
+	return "This project is in plugin mode (%s = \"plugin\"): Mixar does not change its project settings, so it cannot %s. Ask the user to do it in Project Settings." % [MODE_SETTING, what]
+
+
+## In plugin mode: why Mixar may not edit the open scene, else "".
+func _scene_refusal() -> String:
+	if _mode() != "plugin":
+		return ""
+	var root := EditorInterface.get_edited_scene_root()
+	var path := root.scene_file_path if root else ""
+	if path.begins_with(MIXAR_DIR + "/"):
+		return ""
+	var listed: Array = Array(ProjectSettings.get_setting(EDITABLE_SETTING, PackedStringArray()))
+	if path in listed:
+		return ""
+	return "This project is in plugin mode: Mixar edits only levels under %s/ or listed in %s, and %s is neither. Ask the user to add it there, or build in a level of Mixar's own." % [MIXAR_DIR, EDITABLE_SETTING, path if path != "" else "the open scene"]
 
 
 func _reply(request: int, timeout_ms: int):
