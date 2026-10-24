@@ -137,14 +137,24 @@ func _wait(seconds: float) -> void:
 func _hold(action: String, seconds: float) -> Dictionary:
 	if not InputMap.has_action(action):
 		return {"error": "no input action '%s' (actions: %s)" % [action, ", ".join(_actions())]}
-	Input.action_press(action)
+	# As an input event, not Input.action_press: a game that reads _input /
+	# _unhandled_input sees it too, as well as one that polls Input.
+	_send_action(action, true)
 	await get_tree().physics_frame
 	await get_tree().physics_frame
 	if seconds > 0.0:
 		await _wait(seconds)
-	Input.action_release(action)
+	_send_action(action, false)
 	await get_tree().physics_frame
 	return {}
+
+
+func _send_action(action: String, pressed: bool) -> void:
+	var event := InputEventAction.new()
+	event.action = action
+	event.pressed = pressed
+	event.strength = 1.0 if pressed else 0.0
+	Input.parse_input_event(event)
 
 
 func _walk_to(target: Vector3, timeout: float) -> Dictionary:

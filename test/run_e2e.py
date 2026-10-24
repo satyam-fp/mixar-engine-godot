@@ -543,6 +543,7 @@ def main() -> int:
             "extends Node\n"
             "## A countdown: reports time_left; at zero the game is lost.\n"
             "@export var seconds := 30.0\n"
+            "var jumps := 0\n"
             "func _ready() -> void:\n"
             "\tadd_to_group(\"mixar_state\")\n"
             "func _process(delta: float) -> void:\n"
@@ -550,8 +551,11 @@ def main() -> int:
             "\t\tseconds = maxf(0.0, seconds - delta)\n"
             "\t\tif seconds == 0.0:\n"
             "\t\t\tget_tree().call_group(\"mixar_game\", \"on_mixar_event\", \"lose\", self)\n"
+            "func _unhandled_input(event: InputEvent) -> void:\n"
+            "\tif event.is_action_pressed(\"jump\"):\n"
+            "\t\tjumps += 1\n"
             "func mixar_state() -> Dictionary:\n"
-            "\treturn {\"time_left\": snappedf(seconds, 0.1)}\n")
+            "\treturn {\"time_left\": snappedf(seconds, 0.1), \"event_jumps\": jumps}\n")
         r = client.call("write_file", {"path": "res://mixar/scripts/countdown.gd", "content": countdown})
         check(not r["isError"], "write_file a gameplay script", r)
         lift = ("extends AnimatableBody3D\n"
@@ -591,14 +595,17 @@ def main() -> int:
         check(not r["isError"], "remove_node", r)
         r = client.call("play", {"scene": "main"}, timeout=60)
         r = client.call("playtest", {"steps": [
-            {"wait": 0.5}, {"inspect": {"node": "Lift", "properties": ["global_position"]}},
+            {"wait": 0.5}, {"press": "jump"}, {"press": "jump"},
+            {"inspect": {"node": "Lift", "properties": ["global_position"]}},
             {"wait": 0.7}, {"inspect": {"node": "Lift", "properties": ["global_position"]}},
             {"wait": 4.0}, {"state": True}]}, timeout=120)
         res = r["structuredContent"]["steps"] if not r["isError"] else []
-        z0 = res[1]["values"]["global_position"][2] if len(res) > 1 and "values" in res[1] else None
-        z1 = res[3]["values"]["global_position"][2] if len(res) > 3 and "values" in res[3] else None
+        z0 = res[3]["values"]["global_position"][2] if len(res) > 3 and "values" in res[3] else None
+        z1 = res[5]["values"]["global_position"][2] if len(res) > 5 and "values" in res[5] else None
         check(z0 is not None and z1 is not None and abs(z1 - z0) > 0.2, "the written lift moves in the game", (z0, z1))
-        final = res[5]["state"] if len(res) > 5 else {}
+        final = res[7]["state"] if len(res) > 7 else {}
+        check(final.get("event_jumps") == 2,
+              "a playtest press reaches a script's _unhandled_input (once per press)", final)
         check(final.get("time_left") == 0.0 and final.get("lost") is True,
               "the written countdown reports time_left and loses the game", final)
         errors = client.call("log", {"since": r["structuredContent"].get("steps", [{}])[0].get("seq", 0) if False else 0,
