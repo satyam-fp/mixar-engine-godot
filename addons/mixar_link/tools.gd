@@ -8,7 +8,7 @@ extends RefCounted
 ## Mixar works in: Blender (x, y, z) is Godot (x, z, -y), and a yaw about
 ## Blender's Z is the same angle about Godot's Y.
 
-const ADAPTER_VERSION := "0.3.0"
+const ADAPTER_VERSION := "0.3.1"
 ## Project settings the STUDIO sets (never the agent): "owned" (default, a
 ## Mixar-made game) or "plugin" (an existing project: Mixar keeps to
 ## res://mixar/, never edits project settings, and edits only levels under
@@ -74,7 +74,7 @@ func list_tools() -> Array:
 			{"source": {"type": "string", "enum": ["game", "editor"]}, "max_width": {"type": "integer"}}),
 		_tool("log", "Editor and game log lines after `since` (a sequence number from an earlier call).",
 			{"since": {"type": "integer"}, "max_lines": {"type": "integer"}, "errors_only": {"type": "boolean"}}),
-		_tool("playtest", "Run scripted steps in the running game: {hold: action, seconds}, {press: action}, {wait: s}, {walk_to: [x,y,z] Blender frame, timeout} (routed by a navigation mesh baked from the level; no_path when nothing connects), {prove_loop: true, timeout} (every pickup nearest-first, then the goal), {inspect: {node, properties}} (live values from the running game), {state: true}; returns each step's result and the game state after it.",
+		_tool("playtest", "Run scripted steps in the running game: {hold: action, seconds}, {press: action}, {wait: s}, {walk_to: [x,y,z] Blender frame, timeout} (routed by a navigation mesh baked from the level; no_path when nothing connects), {prove_loop: true, timeout} (every pickup nearest-first, then the goal), {inspect: {node, properties}} (live values from the running game; node \".\" is the level root; positions and velocities in the Blender frame, z up, other vectors such as rotation as Godot reports them), {state: true}; returns each step's result and the game state after it.",
 			{"steps": {"type": "array", "items": {"type": "object"}}}, ["steps"]),
 		_tool("write_script", "Write a GDScript under res://mixar/scripts/ after compiling it; a compile error is returned, not written.",
 			{"path": {"type": "string"}, "source": {"type": "string"}}, ["path", "source"]),
@@ -543,12 +543,25 @@ func _validate(path: String, content: String) -> Dictionary:
 					return {"error": "The scene does not instantiate; nothing was written.", "errors": _errors_since(mark)}
 				# An unknown node type loads as a MissingNode placeholder.
 				var missing: Array = []
+				var broken: Array = []
 				for n in [probe_node] + probe_node.find_children("*", "", true, false):
 					if n.get_class() == "MissingNode":
 						missing.append(String(probe_node.get_path_to(n)))
+					# A script embedded in the scene (or one it points at) that does
+					# not compile still loads; it only fails when the game runs.
+					var script = n.get_script()
+					if script is GDScript and script.has_source_code():
+						var probe := GDScript.new()
+						probe.source_code = RegEx.create_from_string("(?m)^class_name\\s+\\w+.*$").sub(
+							script.source_code, "", true)
+						if probe.reload() != OK:
+							broken.append(String(probe_node.get_path_to(n)))
 				probe_node.free()
 				if not missing.is_empty():
 					return {"error": "The scene names node types Godot does not have (%s); nothing was written." % ", ".join(missing),
+						"errors": _errors_since(mark)}
+				if not broken.is_empty():
+					return {"error": "A script in the scene does not compile (on %s); nothing was written." % ", ".join(broken),
 						"errors": _errors_since(mark)}
 			if not _errors_since(mark).is_empty():
 				return {"error": "The resource loaded with errors; nothing was written.", "errors": _errors_since(mark)}

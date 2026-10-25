@@ -315,25 +315,36 @@ func _inspect(spec) -> Dictionary:
 		return {"error": "inspect needs {node, properties}"}
 	var level := get_tree().current_scene
 	var name := String(spec.node)
-	var node: Node = level.get_node_or_null(NodePath(name)) if name.contains("/") else level.find_child(name, true, false)
-	if node == null and level.name == name:
+	var node: Node = null
+	if name == "." or level.name == name:
 		node = level
+	elif name.contains("/"):
+		node = level.get_node_or_null(NodePath(name))
+	else:
+		node = level.find_child(name, true, false)
 	if node == null:
 		return {"error": "no node '%s' in the running game" % name}
 	var values := {}
+	var blender: Array = []
 	for prop in spec.get("properties", ["global_position"]):
 		var key := String(prop)
 		if not (key in node):
 			values[key] = "<no such property>"
 			continue
 		var v = node.get(key)
-		if v is Vector3:
+		# Points and motion in the Blender frame (z up), like walk_to; any
+		# other vector (rotation, scale) as the game's script sees it.
+		if v is Vector3 and (key.contains("position") or key.contains("velocity")):
 			values[key] = C.to_blender(v)
+			blender.append(key)
+		elif v is Vector3:
+			values[key] = [snappedf(v.x, 0.001), snappedf(v.y, 0.001), snappedf(v.z, 0.001)]
 		elif typeof(v) in [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_STRING_NAME]:
 			values[key] = v
 		else:
 			values[key] = var_to_str(v).left(200)
-	return {"node": String(level.get_path_to(node)), "type": node.get_class(), "values": values}
+	return {"node": String(level.get_path_to(node)), "type": node.get_class(), "values": values,
+		"blender_frame": blender}
 
 
 func _state() -> Dictionary:

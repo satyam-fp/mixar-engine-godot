@@ -162,7 +162,8 @@ func _handle(c: Dictionary, req: Dictionary) -> void:
 ## JSON.stringify leaves control characters (a log line's ANSI colour codes)
 ## raw inside strings, which is invalid JSON; escape every one that is left.
 static func json_safe(text: String) -> String:
-	for code in 32:
+	# From 1: a String holds no NUL, and char(0) itself logs a Unicode error.
+	for code in range(1, 32):
 		var ch := char(code)
 		if text.contains(ch):
 			text = text.replace(ch, "\\u%04x" % code)

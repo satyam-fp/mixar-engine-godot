@@ -612,7 +612,25 @@ def main() -> int:
                                      "errors_only": True})["structuredContent"]["lines"]
         check(not any("countdown.gd" in l["file"] or "lift.gd" in l["file"] for l in errors),
               "the written scripts raise no errors", [l["text"] for l in errors][-5:])
+        r = client.call("playtest", {"steps": [
+            {"inspect": {"node": ".", "properties": ["name"]}},
+            {"inspect": {"node": "Lift", "properties": ["rotation", "global_position"]}}]}, timeout=60)
+        res = r["structuredContent"]["steps"] if not r["isError"] else []
+        check(len(res) > 1 and "error" not in res[0] and res[0].get("node") == ".",
+              "inspect '.' reads the level root in the running game", res[:1])
+        check(len(res) > 1 and res[1].get("blender_frame") == ["global_position"]
+              and len(res[1].get("values", {}).get("rotation", [])) == 3,
+              "inspect keeps rotation in Godot's frame, positions in Blender's", res[1:2])
         client.call("stop")
+        broken = ('[gd_scene load_steps=2 format=3]\n\n'
+                  '[sub_resource type="GDScript" id="1"]\nscript/source = "extends Node\\nfunc _ready():\\n\\tvar x := \\n"\n\n'
+                  '[node name="Broken" type="Node"]\nscript = SubResource("1")\n')
+        r = client.call("write_file", {"path": "res://mixar/scenes/embedded_bad.tscn", "content": broken})
+        check(r["isError"] and not os.path.exists(os.path.join(project, "mixar", "scenes", "embedded_bad.tscn")),
+              "a scene whose embedded script does not compile is not written", r["content"][0]["text"][:200])
+        fine = broken.replace('var x := \\n', 'pass\\n')
+        r = client.call("write_file", {"path": "res://mixar/scenes/embedded_ok.tscn", "content": fine})
+        check(not r["isError"], "a scene with a compiling embedded script is written", r["content"][0]["text"][:200])
         client.call("remove_node", {"node": "Countdown"})
         client.call("remove_node", {"node": "Lift"})
 
@@ -651,6 +669,9 @@ def main() -> int:
         r = client.call("new_scene", {"name": "TopLevel", "template": "top_down", "ground": True})
         check(not r["isError"] and 'mode = "top_down"' in open(os.path.join(
             project, "mixar", "levels", "TopLevel.tscn")).read(), "new_scene top_down", r)
+        lines = client.call("log", {"errors_only": True, "max_lines": 500})["structuredContent"]["lines"]
+        unicode = [l["text"] for l in lines if "Unicode parsing error" in l["text"]]
+        check(not unicode, "the link's own replies log no Unicode errors", unicode[:2])
     finally:
         proc.terminate()
         try:
