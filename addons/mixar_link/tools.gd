@@ -8,7 +8,7 @@ extends RefCounted
 ## Mixar works in: Blender (x, y, z) is Godot (x, z, -y), and a yaw about
 ## Blender's Z is the same angle about Godot's Y.
 
-const ADAPTER_VERSION := "0.3.1"
+const ADAPTER_VERSION := "0.3.2"
 ## Project settings the STUDIO sets (never the agent): "owned" (default, a
 ## Mixar-made game) or "plugin" (an existing project: Mixar keeps to
 ## res://mixar/, never edits project settings, and edits only levels under
@@ -476,7 +476,7 @@ func _playtest(args: Dictionary):
 
 const TEXT_EXTENSIONS := ["gd", "tscn", "tres", "gdshader", "json", "txt", "md", "cfg", "csv"]
 const SETTING_PREFIXES := ["input/", "autoload/", "application/run/main_scene", "application/config/name",
-	"display/window/", "physics/", "rendering/environment/defaults/", "layer_names/"]
+	"display/window/", "physics/", "rendering/", "layer_names/"]
 const MAX_READ_BYTES := 200000
 
 

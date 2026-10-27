@@ -591,6 +591,10 @@ def main() -> int:
         client.call("project_setting", {"name": "autoload/Score", "value": None})
         r = client.call("project_setting", {"name": "network/limits/x", "value": 1})
         check(r["isError"], "project_setting refuses settings outside its list")
+        # The CS:GO run's realism pass was refused the renderer and AA settings.
+        r = client.call("project_setting", {"name": "rendering/anti_aliasing/quality/msaa_3d", "value": 2})
+        check(not r["isError"], "project_setting sets rendering quality settings", r)
+        client.call("project_setting", {"name": "rendering/anti_aliasing/quality/msaa_3d", "value": 0})
         r = client.call("remove_node", {"node": "Marker"})
         check(not r["isError"], "remove_node", r)
         r = client.call("play", {"scene": "main"}, timeout=60)
