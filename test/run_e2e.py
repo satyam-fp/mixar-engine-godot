@@ -89,6 +89,99 @@ def glb_cube(path: str, names: list[str]) -> None:
         fh.write(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
 
 
+# A small humanoid skeleton (glTF: Y up, facing +Z, the character's left at +X):
+# name, parent, local translation. Tripo auto-rig names; MIXAMO_NAMES renames.
+HUMANOID = [
+    ("BoneRoot", None, (0, 0, 0)), ("Hip", "BoneRoot", (0, 1.0, 0)), ("Waist", "Hip", (0, .1, 0)),
+    ("Spine01", "Waist", (0, .15, 0)), ("Spine02", "Spine01", (0, .15, 0)),
+    ("NeckTwist01", "Spine02", (0, .2, 0)), ("Head", "NeckTwist01", (0, .1, 0)),
+    ("L_Clavicle", "Spine02", (.05, .15, 0)), ("L_Upperarm", "L_Clavicle", (.15, 0, 0)),
+    ("L_Forearm", "L_Upperarm", (.28, 0, 0)), ("L_Hand", "L_Forearm", (.25, 0, 0)),
+    ("R_Clavicle", "Spine02", (-.05, .15, 0)), ("R_Upperarm", "R_Clavicle", (-.15, 0, 0)),
+    ("R_Forearm", "R_Upperarm", (-.28, 0, 0)), ("R_Hand", "R_Forearm", (-.25, 0, 0)),
+    ("L_Thigh", "Hip", (.1, -.05, 0)), ("L_Calf", "L_Thigh", (0, -.45, 0)), ("L_Foot", "L_Calf", (0, -.45, 0)),
+    ("L_ToeBase", "L_Foot", (0, -.05, .12)),
+    ("R_Thigh", "Hip", (-.1, -.05, 0)), ("R_Calf", "R_Thigh", (0, -.45, 0)), ("R_Foot", "R_Calf", (0, -.45, 0)),
+    ("R_ToeBase", "R_Foot", (0, -.05, .12)),
+]
+MIXAMO_NAMES = {"BoneRoot": "Root", "Hip": "Hips", "Waist": "Spine", "Spine01": "Spine1", "Spine02": "Spine2",
+                "NeckTwist01": "Neck", "Head": "Head"}
+for _side, _full in (("L", "Left"), ("R", "Right")):
+    MIXAMO_NAMES.update({f"{_side}_Clavicle": f"{_full}Shoulder", f"{_side}_Upperarm": f"{_full}Arm",
+                         f"{_side}_Forearm": f"{_full}ForeArm", f"{_side}_Hand": f"{_full}Hand",
+                         f"{_side}_Thigh": f"{_full}UpLeg", f"{_side}_Calf": f"{_full}Leg",
+                         f"{_side}_Foot": f"{_full}Foot", f"{_side}_ToeBase": f"{_full}ToeBase"})
+
+
+def glb_humanoid(path: str, naming: str = "tripo", wave: bool = False) -> None:
+    """A skinned GLB on HUMANOID with Tripo or Mixamo ("mixamorig:") bone names;
+    ``wave`` adds a "Wave" clip raising the left upper arm 70 degrees at 0.4 s."""
+    import math
+    names = [n if naming == "tripo" else "mixamorig:" + MIXAMO_NAMES[n] for n, _, _ in HUMANOID]
+    index = {n: i + 2 for i, (n, _, _) in enumerate(HUMANOID)}   # 0 Armature, 1 Body
+    world = {}
+    for n, parent, t in HUMANOID:
+        base = world[parent] if parent else (0, 0, 0)
+        world[n] = tuple(a + b for a, b in zip(base, t))
+    pos = struct.pack("<12f", -.1, .9, 0, .1, .9, 0, 0, 1.1, 0, 0, 1.0, .1)
+    idx = struct.pack("<12H", 0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3)
+    joints = struct.pack("<16B", *([1, 0, 0, 0] * 4))
+    weights = struct.pack("<16f", *([1, 0, 0, 0] * 4))
+    ibm = b"".join(struct.pack("<16f", 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -x, -y, -z, 1)
+                   for x, y, z in (world[n] for n, _, _ in HUMANOID))
+    chunks = [pos, idx, joints, weights, ibm]
+    if wave:
+        half = math.radians(35)
+        chunks += [struct.pack("<3f", 0, .4, .8),
+                   struct.pack("<12f", 0, 0, 0, 1, 0, 0, math.sin(half), math.cos(half), 0, 0, 0, 1)]
+    views, blob = [], b""
+    for c in chunks:
+        views.append({"buffer": 0, "byteOffset": len(blob), "byteLength": len(c)})
+        blob += c + b"\0" * (-len(c) % 4)
+    accessors = [
+        {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [-.1, .9, 0], "max": [.1, 1.1, .1]},
+        {"bufferView": 1, "componentType": 5123, "count": 12, "type": "SCALAR"},
+        {"bufferView": 2, "componentType": 5121, "count": 4, "type": "VEC4"},
+        {"bufferView": 3, "componentType": 5126, "count": 4, "type": "VEC4"},
+        {"bufferView": 4, "componentType": 5126, "count": len(HUMANOID), "type": "MAT4"},
+    ]
+    nodes = [{"name": "Armature", "children": [1, index["BoneRoot"]]},
+             {"name": "Body", "mesh": 0, "skin": 0}]
+    for (n, _, t), name in zip(HUMANOID, names):
+        node = {"name": name, "translation": list(t)}
+        kids = [index[c] for c, p, _ in HUMANOID if p == n]
+        if kids:
+            node["children"] = kids
+        nodes.append(node)
+    doc = {"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}], "nodes": nodes,
+           "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "JOINTS_0": 2, "WEIGHTS_0": 3},
+                                       "indices": 1}]}],
+           "skins": [{"joints": [index[n] for n, _, _ in HUMANOID], "skeleton": index["BoneRoot"],
+                      "inverseBindMatrices": 4}],
+           "accessors": accessors, "bufferViews": views, "buffers": [{"byteLength": len(blob)}]}
+    if wave:
+        accessors += [{"bufferView": 5, "componentType": 5126, "count": 3, "type": "SCALAR", "min": [0], "max": [.8]},
+                      {"bufferView": 6, "componentType": 5126, "count": 3, "type": "VEC4"}]
+        doc["animations"] = [{"name": "Wave", "samplers": [{"input": 5, "output": 6}],
+                              "channels": [{"sampler": 0, "target": {"node": index["L_Upperarm"],
+                                                                      "path": "rotation"}}]}]
+    js = json.dumps(doc).encode()
+    js += b" " * (-len(js) % 4)
+    body = struct.pack("<II", len(js), 0x4E4F534A) + js + struct.pack("<II", len(blob), 0x004E4942) + blob
+    with open(path, "wb") as fh:
+        fh.write(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
+
+
+def humanoid_package(root: str, name: str, naming: str, wave: bool) -> str:
+    folder = os.path.join(root, name)
+    os.makedirs(folder, exist_ok=True)
+    glb_humanoid(os.path.join(folder, name + ".glb"), naming, wave)
+    with open(os.path.join(folder, "manifest.json"), "w") as fh:
+        json.dump({"asset": name, "format": "glb", "generator": "Mixar export_package",
+                   "files": [{"file": name + ".glb"}]}, fh)
+    return folder
+
+
 def glb_level(path: str, nodes: list[dict]) -> None:
     """A GLB of unit cubes: each node {name, t (glTF xyz), s (scale), extras?,
     children?}; a child shares its parent's transform (a collision hint)."""
@@ -637,6 +730,56 @@ def main() -> int:
         check(not r["isError"], "a scene with a compiling embedded script is written", r["content"][0]["text"][:200])
         client.call("remove_node", {"node": "Countdown"})
         client.call("remove_node", {"node": "Lift"})
+
+        # P0.4: a Tripo rig and a Mixamo rig go onto Godot's humanoid profile on
+        # import, and a clip made on the Mixamo rig plays on the Tripo one.
+        hero = humanoid_package(tmp, "Hero", "tripo", wave=False)
+        waver = humanoid_package(tmp, "Waver", "mixamo", wave=True)
+        r = client.call("import_package", {"source_dir": hero, "folder": "Hero"})
+        check(not r["isError"] and r["structuredContent"].get("retarget", {}).get("naming") == "tripo",
+              "a Tripo rig is retargeted to the humanoid profile on import", r["structuredContent"])
+        r = client.call("import_package", {"source_dir": waver, "folder": "Waver"})
+        check(not r["isError"] and r["structuredContent"].get("retarget", {}).get("naming") == "mixamo",
+              "a Mixamo rig is retargeted to the humanoid profile on import", r["structuredContent"])
+        wave_check = (
+            "extends Node3D\n"
+            "var angle := -1.0\n"
+            "var humanoid := false\n"
+            "func _ready() -> void:\n"
+            "\tadd_to_group(\"mixar_state\")\n"
+            "\tvar src: Node = load(\"res://mixar/Waver/Waver.glb\").instantiate()\n"
+            "\tvar wave: Animation = src.find_children(\"*\", \"AnimationPlayer\", true, false)[0].get_animation(\"Wave\")\n"
+            "\tvar hero: Node3D = load(\"res://mixar/Hero/Hero.glb\").instantiate()\n"
+            "\tadd_child(hero)\n"
+            "\tvar skel: Skeleton3D = hero.get_node(\"%GeneralSkeleton\")\n"
+            "\thumanoid = skel.find_bone(\"LeftUpperArm\") >= 0 and skel.find_bone(\"L_Upperarm\") < 0\n"
+            "\tvar bone := skel.find_bone(\"LeftUpperArm\")\n"
+            "\tvar rest := skel.get_bone_pose_rotation(bone)\n"
+            "\tvar player := AnimationPlayer.new()\n"
+            "\thero.add_child(player)\n"
+            "\tplayer.root_node = player.get_path_to(hero)\n"
+            "\tvar lib := AnimationLibrary.new()\n"
+            "\tlib.add_animation(\"Wave\", wave)\n"
+            "\tplayer.add_animation_library(\"\", lib)\n"
+            "\tplayer.play(\"Wave\")\n"
+            "\tplayer.seek(0.4, true)\n"
+            "\tangle = rad_to_deg(rest.angle_to(skel.get_bone_pose_rotation(bone)))\n"
+            "\tsrc.free()\n"
+            "func mixar_state() -> Dictionary:\n"
+            "\treturn {\"wave_angle\": snappedf(angle, 0.1), \"hero_humanoid\": humanoid}\n")
+        r = client.call("write_file", {"path": "res://mixar/scripts/wave_check.gd", "content": wave_check})
+        check(not r["isError"], "write the retarget check script", r)
+        r = client.call("add_node", {"type": "Node3D", "name": "WaveCheck", "script": "res://mixar/scripts/wave_check.gd"})
+        check(not r["isError"], "attach the retarget check", r)
+        client.call("play", {"scene": "main"}, timeout=60)
+        r = client.call("playtest", {"steps": [{"wait": 0.3}, {"state": True}]}, timeout=60)
+        res = r["structuredContent"]["steps"] if not r["isError"] else []
+        state = res[-1].get("state", {}) if res else {}
+        check(state.get("hero_humanoid") is True, "the Tripo rig's bones carry the humanoid names in the game", state)
+        check(float(state.get("wave_angle", -1)) > 40.0,
+              "a clip made on the Mixamo rig plays on the Tripo rig (left upper arm raised)", state)
+        client.call("stop")
+        client.call("remove_node", {"node": "WaveCheck"})
 
         # prove_loop on a fresh run: every pickup, then the goal, unaided.
         r = client.call("play", {"scene": "main"}, timeout=60)

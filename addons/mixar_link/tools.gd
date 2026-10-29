@@ -8,7 +8,7 @@ extends RefCounted
 ## Mixar works in: Blender (x, y, z) is Godot (x, z, -y), and a yaw about
 ## Blender's Z is the same angle about Godot's Y.
 
-const ADAPTER_VERSION := "0.3.3"
+const ADAPTER_VERSION := "0.4.0"
 ## Project settings the STUDIO sets (never the agent): "owned" (default, a
 ## Mixar-made game) or "plugin" (an existing project: Mixar keeps to
 ## res://mixar/, never edits project settings, and edits only levels under
@@ -16,6 +16,7 @@ const ADAPTER_VERSION := "0.3.3"
 const MODE_SETTING := "mixar_link/project_mode"
 const EDITABLE_SETTING := "mixar_link/editable_scenes"
 const MIXAR_DIR := "res://mixar"
+const Retarget := preload("res://addons/mixar_link/retarget.gd")
 const IMPORT_TIMEOUT_MS := 120000
 const PLAY_TIMEOUT_MS := 20000
 const FRAME_TIMEOUT_MS := 8000
@@ -194,6 +195,14 @@ func _import_package(args: Dictionary):
 			break
 		await tree.process_frame
 	var imported := ResourceLoader.exists(main_res)
+	var retarget := {}
+	if imported:
+		# A Tripo or Mixamo rig goes onto Godot's humanoid profile, so clips
+		# made on any mapped character play on this one (retarget.gd).
+		retarget = Retarget.configure(main_res)
+		if not retarget.is_empty():
+			fs.reimport_files(PackedStringArray([main_res]))  # blocks until reimported
+			await tree.process_frame
 	var engine: Dictionary = manifest.engine if typeof(manifest.get("engine")) == TYPE_DICTIONARY else {}
 	var data := {
 		"folder": dest_res, "main_scene": main_res if imported else "", "imported": imported,
@@ -202,6 +211,10 @@ func _import_package(args: Dictionary):
 		"tagged_objects": (engine.get("objects", []) as Array).size(),
 		"collision_nodes": int(engine.get("collision_nodes", 0)),
 	}
+	if not retarget.is_empty():
+		data["retarget"] = {"naming": retarget.naming, "profile": "humanoid", "mapped_bones": retarget.mapped,
+			"skeleton": "%GeneralSkeleton", "note": "Bones take Godot's humanoid names (Hips, LeftUpperArm, ...); "
+			+ "a clip from any retargeted character plays on this one."}
 	if not imported:
 		return _err("The package was copied but %s did not import within %d s; read log for the importer's errors." % [
 			main_res, IMPORT_TIMEOUT_MS / 1000], data)
