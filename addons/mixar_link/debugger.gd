@@ -13,8 +13,16 @@ var _runtime_ready := false
 
 func _setup_session(session_id: int) -> void:
 	var session := get_session(session_id)
-	session.started.connect(func(): _runtime_ready = false)
-	session.stopped.connect(func(): _runtime_ready = false)
+	# A reply that lands after its request timed out must never answer a
+	# request of the NEXT play session (cs-go iter 4: a capture showed the
+	# previous session's frame).
+	session.started.connect(_reset)
+	session.stopped.connect(_reset)
+
+
+func _reset() -> void:
+	_runtime_ready = false
+	_replies.clear()
 
 
 func _has_capture(capture: String) -> bool:

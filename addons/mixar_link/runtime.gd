@@ -94,8 +94,11 @@ func _capture(request_id: int, max_width: int) -> void:
 	if max_width > 0 and image.get_width() > max_width:
 		image.resize(max_width, maxi(1, image.get_height() * max_width / image.get_width()),
 			Image.INTERPOLATE_BILINEAR)
+	# Which frame, how long after the game started: a frame the editor cannot
+	# date cannot be told apart from a stale one.
 	EngineDebugger.send_message("mixar:frame",
-		[request_id, image.save_jpg_to_buffer(0.85), image.get_width(), image.get_height()])
+		[request_id, image.save_jpg_to_buffer(0.85), image.get_width(), image.get_height(),
+		Engine.get_frames_drawn(), Time.get_ticks_msec()])
 
 
 # ---------------------------------------------------------------------------

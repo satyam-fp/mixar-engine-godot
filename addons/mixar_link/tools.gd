@@ -8,7 +8,7 @@ extends RefCounted
 ## Mixar works in: Blender (x, y, z) is Godot (x, z, -y), and a yaw about
 ## Blender's Z is the same angle about Godot's Y.
 
-const ADAPTER_VERSION := "0.3.2"
+const ADAPTER_VERSION := "0.3.3"
 ## Project settings the STUDIO sets (never the agent): "owned" (default, a
 ## Mixar-made game) or "plugin" (an existing project: Mixar keeps to
 ## res://mixar/, never edits project settings, and edits only levels under
@@ -19,6 +19,7 @@ const MIXAR_DIR := "res://mixar"
 const IMPORT_TIMEOUT_MS := 120000
 const PLAY_TIMEOUT_MS := 20000
 const FRAME_TIMEOUT_MS := 8000
+const LOADING_FRAME_TIMEOUT_MS := 12000
 const SKIP_EXTENSIONS := ["blend", "blend1"]
 ## Template name → the player's mode; every template shares the player, game
 ## manager and HUD scripts in TEMPLATE_DIR.
@@ -437,12 +438,22 @@ func _capture(args: Dictionary):
 	if request < 0:
 		return _err("The game is not running; call play first.")
 	var frame = await _reply(request, FRAME_TIMEOUT_MS)
+	if frame == null and debugger.connected():
+		# A game that just started may still be loading its main scene: the
+		# runtime is listening but no frame is drawn until the load ends
+		# (cs-go iter 4: twice "no frame within 8 s" right after play).
+		frame = await _reply(request, LOADING_FRAME_TIMEOUT_MS)
 	if frame == null:
-		return _err("The game sent no frame within %d s." % (FRAME_TIMEOUT_MS / 1000))
+		return _err("The game sent no frame within %d s; it may still be loading. Read the log, then capture again."
+			% ((FRAME_TIMEOUT_MS + LOADING_FRAME_TIMEOUT_MS) / 1000))
 	var jpeg: PackedByteArray = frame[1]
 	if jpeg.is_empty():
 		return _err("The game's viewport has no image (a headless game draws nothing).")
-	return _image({"source": "game", "width": int(frame[2]), "height": int(frame[3])}, jpeg)
+	var info := {"source": "game", "width": int(frame[2]), "height": int(frame[3])}
+	if frame.size() >= 6:
+		info["game_frame"] = int(frame[4])
+		info["game_uptime_s"] = snappedf(float(frame[5]) / 1000.0, 0.1)
+	return _image(info, jpeg)
 
 
 func _log(args: Dictionary):
